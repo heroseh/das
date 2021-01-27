@@ -1,12 +1,13 @@
 # DAS - dynamically allocated storage
 
-A simple dynamic allocation library with a stack and double ended queue implementation.
+A feature rich dynamic allocation library.
 
 # Features
 - array-like stack (DasStk)
 - double ended queue (DasDeque)
 - custom allocator interface (DasAlctor)
 - allocation API that use custom allocators (das_alloc, das_realloc, das_dealloc)
+- virtual memory abstraction
 - compiles as ISO C99
 - simple API to keep user code as simple as possible.
 	- zeroed memory is initialization

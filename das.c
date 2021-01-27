@@ -2,6 +2,21 @@
 #error "expected das.h to be included before das.c"
 #endif
 
+#ifdef __linux__
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <asm-generic/mman.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+#include <fcntl.h>
+#elif _WIN32
+// TODO: i have read that the windows headers can really slow down compile times.
+// since the win32 api is stable maybe we should forward declare the functions and constants manually ourselves
+#include <windows.h>
+#endif
+
 // ======================================================================
 //
 //
@@ -547,5 +562,218 @@ uintptr_t _DasDeque_pop_back_many(_DasDequeHeader* header, uintptr_t elmts_count
 
 	header->back_idx = _DasDeque_wrapping_sub(header->cap, header->back_idx, elmts_count);
 	return elmts_count;
+}
+
+// ===========================================================================
+//
+//
+// Virtual Memory Abstraction
+//
+//
+// ===========================================================================
+
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+static int _das_virt_mem_prot_unix(DasVirtMemProtection prot) {
+	switch (prot) {
+		case DasVirtMemProtection_no_access: return 0;
+		case DasVirtMemProtection_read: return PROT_READ;
+		case DasVirtMemProtection_read_write: return PROT_READ | PROT_WRITE;
+		case DasVirtMemProtection_exec_read: return PROT_EXEC | PROT_READ;
+		case DasVirtMemProtection_exec_read_write: return PROT_READ | PROT_WRITE | PROT_EXEC;
+	}
+	return 0;
+}
+#elif _WIN32
+static DWORD _das_virt_mem_prot_windows(DasVirtMemProtection prot) {
+	switch (prot) {
+		case DasVirtMemProtection_no_access: return PAGE_NOACCESS;
+		case DasVirtMemProtection_read: return PAGE_READONLY;
+		case DasVirtMemProtection_read_write: return PAGE_READWRITE;
+		case DasVirtMemProtection_exec_read: return PAGE_EXECUTE_READ;
+		case DasVirtMemProtection_exec_read_write: return PAGE_EXECUTE_READWRITE;
+	}
+	return 0;
+}
+#else
+#error "unimplemented virtual memory API for this platform"
+#endif
+
+DasVirtMemError das_virt_mem_get_last_error() {
+#ifdef __linux__
+	return errno;
+#elif _WIN32
+    return GetLastError();
+#endif
+}
+
+DasVirtMemErrorStrRes das_virt_mem_get_error_string(DasVirtMemError error, char* buf_out, uint32_t buf_out_len) {
+#if _WIN32
+	DWORD res = FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, error, 0, (LPTSTR)buf_out, buf_out_len, NULL);
+	if (res == 0) {
+		error = GetLastError();
+		das_abort("TODO handle error code: %u", error);
+	}
+#elif _GNU_SOURCE
+	// GNU version (screw these guys for changing the way this works)
+	char* buf = strerror_r(error, buf_out, buf_out_len);
+	if (strcmp(buf, "Unknown error") == 0) {
+		return DasVirtMemErrorStrRes_invalid_error_arg;
+	}
+
+	// if its static string then copy it to the buffer
+	if (buf != buf_out) {
+		strncpy(buf_out, buf, buf_out_len);
+
+		uint32_t len = strlen(buf);
+		if (len < buf_out_len) {
+			return DasVirtMemErrorStrRes_not_enough_space_in_buffer;
+		}
+	}
+#elif defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+	// use the XSI standard behavior.
+	int res = strerror_r(error, buf_out, buf_out_len);
+	if (res != 0) {
+		int errnum = res;
+		if (res == -1)
+			errnum = errno;
+
+		if (errnum == EINVAL) {
+			return DasVirtMemErrorStrRes_invalid_error_arg;
+		} else if (errnum == ERANGE) {
+			return DasVirtMemErrorStrRes_not_enough_space_in_buffer;
+		}
+		das_abort("unexpected errno: %u", errnum);
+	}
+#else
+#error "unimplemented virtual memory error string"
+#endif
+	return DasVirtMemErrorStrRes_success;
+}
+
+uintptr_t das_virt_mem_page_size() {
+#ifdef __linux__
+	return sysconf(_SC_PAGESIZE);
+#elif _WIN32
+	SYSTEM_INFO si;
+    GetSystemInfo(&si);
+	// this actually returns the page granularity and not the page size.
+	// since Virtual{Alloc, Protect, Free}.lpAddress must be aligned to the page granularity (region of pages)
+	return si.dwAllocationGranularity;
+#endif
+}
+
+void* das_virt_mem_reserve(void* requested_addr, uintptr_t size) {
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+	// memory is automatically commited on Unix based OSs,
+	// so we will restrict the memory from being accessed on reserved.
+	int prot = 0;
+
+	// MAP_ANON = means map physical memory and not a file. it also means the memory will be initialized to zero
+	// MAP_PRIVATE = keep memory private so child process cannot access them
+	// MAP_NORESERVE = do not reserve any swap space for this mapping
+	void* addr = mmap(requested_addr, size, prot, MAP_ANON | MAP_PRIVATE | MAP_NORESERVE, -1, 0);
+	return addr == MAP_FAILED ? NULL : addr;
+#else
+#error "TODO implement virtual memory for this platform"
+#endif
+}
+
+DasBool das_virt_mem_commit(void* addr, uintptr_t size, DasVirtMemProtection protection) {
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+	// memory is automatically commited on Unix based OSs,
+	// memory is restricted from being accessed in our das_virt_mem_reserve.
+	// so lets just apply the protection for the address space.
+	// and then advise the OS that these pages will be used soon.
+	int prot = _das_virt_mem_prot_unix(protection);
+	if (mprotect(addr, size, prot) != 0) return das_false;
+	return madvise(addr, size, MADV_WILLNEED) == 0;
+#else
+#error "TODO implement virtual memory for this platform"
+#endif
+}
+
+DasBool das_virt_mem_protection_set(void* addr, uintptr_t size, DasVirtMemProtection protection) {
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+	int prot = _das_virt_mem_prot_unix(protection);
+	return mprotect(addr, size, prot) == 0;
+#else
+#error "TODO implement virtual memory for this platform"
+#endif
+}
+
+DasBool das_virt_mem_decommit(void* addr, uintptr_t size) {
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+
+	//
+	// advise the OS that these pages will not be needed.
+	// the OS will zero fill these pages before you next access them.
+	if (madvise(addr, size, MADV_DONTNEED) != 0) return das_false;
+
+	// memory is automatically commited on Unix based OSs,
+	// so we will restrict the memory from being accessed when we "decommit.
+	int prot = 0;
+	return mprotect(addr, size, prot) == 0;
+#else
+#error "TODO implement virtual memory for this platform"
+#endif
+}
+
+DasBool das_virt_mem_release(void* addr, uintptr_t size) {
+#ifdef __linux__
+	return munmap(addr, size) == 0;
+#else
+#error "TODO implement virtual memory for this platform"
+#endif
+
+	return das_true;
+}
+
+void* das_virt_mem_map_file(char* path, DasVirtMemProtection protection, uintptr_t* size_out, DasVirtMemFileHandle* file_handle_out) {
+	if (protection == DasVirtMemProtection_no_access)
+		das_abort("cannot map a file with no access");
+
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+	int prot = _das_virt_mem_prot_unix(protection);
+
+	int fd_flags = 0;
+	switch (protection) {
+		case DasVirtMemProtection_read:
+		case DasVirtMemProtection_exec_read:
+			fd_flags = O_RDONLY;
+			break;
+		case DasVirtMemProtection_read_write:
+		case DasVirtMemProtection_exec_read_write:
+			fd_flags = O_RDWR;
+			break;
+	}
+
+	int fd = open(path, fd_flags);
+	if (fd == -1) return 0;
+
+	// get the size of the file
+	struct stat s = {};
+	if (fstat(fd, &s) != 0) return 0;
+	uintptr_t size = s.st_size;
+
+	void* addr = mmap(NULL, size, prot, MAP_SHARED, fd, 0);
+	if (addr == MAP_FAILED) {
+		close(fd);
+		return NULL;
+	}
+	*size_out = size;
+	*file_handle_out = fd;
+	return addr;
+#else
+#error "TODO implement virtual memory for this platform"
+#endif
+}
+
+DasBool das_virt_mem_map_file_close(void* addr, uintptr_t size, DasVirtMemFileHandle file_handle) {
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+	if (munmap(addr, size) != 0) return das_false;
+	return close(file_handle) == 0;
+#else
+#error "TODO implement virtual memory for this platform"
+#endif
 }
 

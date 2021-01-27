@@ -41,8 +41,9 @@
 #include <stdio.h> // fprintf, vsnprintf
 #include <stdlib.h> // abort
 #include <string.h> // memcpy, memmove
-#include <stddef.h> // ptrdiff_t
-#include <errno.h> // ptrdiff_t
+#include <stddef.h>
+#include <errno.h>
+#include <math.h>
 
 typedef uint8_t DasBool;
 #define das_false 0
@@ -69,14 +70,14 @@ typedef uint8_t DasBool;
 #endif
 
 noreturn void _das_abort(const char* file, int line, const char* func, char* assert_test, char* message_fmt, ...);
-#define das_abort(message_fmt, ...) \
-	_das_abort(__FILE__, __LINE__, das_function_name, NULL, __VA_ARGS__);
+#define das_abort(...) \
+	_das_abort(__FILE__, __LINE__, das_function_name, NULL, __VA_ARGS__)
 
 #define das_assert(cond, ...) \
-	if (!(cond)) _das_abort(__FILE__, __LINE__, das_function_name, #cond, __VA_ARGS__);
+	if (!(cond)) _das_abort(__FILE__, __LINE__, das_function_name, #cond, __VA_ARGS__)
 
 #define das_assert_loc(file, line, func, cond, ...) \
-	if (!(cond)) _das_abort(file, line, func, #cond, __VA_ARGS__);
+	if (!(cond)) _das_abort(file, line, func, #cond, __VA_ARGS__)
 
 #if DAS_DEBUG_ASSERTIONS
 #define das_debug_assert das_assert
@@ -104,6 +105,32 @@ static inline uintptr_t das_clamp_u(uintptr_t v, uintptr_t min, uintptr_t max) {
 static inline intptr_t das_clamp_s(intptr_t v, intptr_t min, intptr_t max) { return v > max ? max : (v >= min ? v : min); }
 static inline double das_clamp_f(double v, double min, double max) { return v > max ? max : (v >= min ? v : min); }
 
+static inline uintptr_t das_round_up_nearest_multiple_u(uintptr_t v, uintptr_t multiple) {
+	uintptr_t rem = v % multiple;
+	if (rem == 0) return v;
+	return v + multiple - rem;
+}
+
+static inline intptr_t das_round_up_nearest_multiple_s(intptr_t v, intptr_t multiple) {
+	intptr_t rem = v % multiple;
+	if (rem == 0) return v;
+	if (v > 0) {
+		return v + multiple - rem;
+	} else {
+		return v + rem;
+	}
+}
+
+static inline double das_round_up_nearest_multiple_f(double v, double multiple) {
+	double rem = fmod(v, multiple);
+	if (rem == 0.0) return v;
+	if (v > 0.0) {
+		return v + multiple - rem;
+	} else {
+		return v + rem;
+	}
+}
+
 // ======================================================================
 //
 //
@@ -114,7 +141,7 @@ static inline double das_clamp_f(double v, double min, double max) { return v > 
 
 extern void* das_ptr_round_up_align(void* ptr, uintptr_t align);
 extern void* das_ptr_round_down_align(void* ptr, uintptr_t align);
-#define das_is_power_of_two(v) ((v != 0) && ((v & (v - 1)) == 0))
+#define das_is_power_of_two(v) (((v) != 0) && (((v) & ((v) - 1)) == 0))
 #define das_ptr_add(ptr, by) (void*)((uintptr_t)(ptr) + (uintptr_t)(by))
 #define das_ptr_sub(ptr, by) (void*)((uintptr_t)(ptr) - (uintptr_t)(by))
 #define das_ptr_diff(to, from) ((char*)(to) - (char*)(from))
@@ -233,6 +260,8 @@ void* das_system_alloc_fn(void* alloc_data, void* ptr, uintptr_t old_size, uintp
 
 // deallocates @param(old_size) bytes of memory that is aligned to @param(align'
 #define das_dealloc(alctor, ptr, old_size, align) alctor.fn(alctor.data, ptr, old_size, 0, align);
+
+#define das_alloc_reset(alctor) alctor.fn(alctor.data, NULL, 0, 0, 0);
 
 // ======================================================================
 //
@@ -574,6 +603,172 @@ uintptr_t _DasDeque_pop_front_many(_DasDequeHeader* header, uintptr_t elmts_coun
 #define DasDeque_pop_back(deque_ptr) DasDeque_pop_back_many(deque_ptr, 1)
 #define DasDeque_pop_back_many(deque_ptr, elmts_count) _DasDeque_pop_back_many((_DasDequeHeader*)*(deque_ptr), elmts_count, DasDeque_elmt_size(deque_ptr))
 uintptr_t _DasDeque_pop_back_many(_DasDequeHeader* header, uintptr_t elmts_count, uintptr_t elmt_size);
+
+// ===========================================================================
+//
+//
+// Virtual Memory Abstraction
+//
+//
+// ===========================================================================
+
+typedef uint8_t DasVirtMemProtection;
+enum {
+	DasVirtMemProtection_no_access,
+	DasVirtMemProtection_read,
+	DasVirtMemProtection_read_write,
+	DasVirtMemProtection_exec_read,
+	DasVirtMemProtection_exec_read_write,
+};
+
+//
+// 0 means success
+typedef uint32_t DasVirtMemError;
+
+//
+// @return: the previous error of a virtual memory function call.
+//          only call this directly after one of the virtual memory functions.
+//          on Unix: this returns errno
+//          on Windows: this returns GetLastError()
+//
+DasVirtMemError das_virt_mem_get_last_error();
+
+typedef uint8_t DasVirtMemErrorStrRes;
+enum {
+	DasVirtMemErrorStrRes_success,
+	DasVirtMemErrorStrRes_invalid_error_arg,
+	DasVirtMemErrorStrRes_not_enough_space_in_buffer,
+};
+
+//
+// get the string of @param(error) and writes it into the @param(buf_out) pointer upto @param(buf_out_len)
+// @param(buf_out) is null terminated on success.
+//
+// @return: the result detailing the success or error.
+//
+DasVirtMemErrorStrRes das_virt_mem_get_error_string(DasVirtMemError error, char* buf_out, uint32_t buf_out_len);
+
+//
+// @return: the page size of the OS.
+// 			used to align the parameters of the virtual memory functions to a page.
+//          On Windows this actually returns the page granularity and not the page size.
+//          since Virtual{Alloc, Protect, Free}.lpAddress must be aligned to the page granularity (region of pages)
+//
+uintptr_t das_virt_mem_page_size();
+
+//
+// reserve a range of the virtual address space but does not commit any physical pages of memory.
+// none of this memory cannot be used until das_virt_mem_commit is called.
+//
+// @param requested_addr: the requested start address you wish to reserve.
+//             must be a aligned to whatever das_virt_mem_page_size returns.
+//             this is not guaranteed and is only used as hint.
+//             NULL will not be used as a hint.
+//
+// @param size: the size in bytes you wish to reserve from the @param(requested_addr)
+//             must be a aligned to whatever das_virt_mem_page_size returns.
+//
+// @return: NULL on error, otherwise the start of the reserved block of memory.
+//          if errored you can get the error by calling das_virt_mem_get_last_error()
+//          directly after this call
+//
+void* das_virt_mem_reserve(void* requested_addr, uintptr_t size);
+
+//
+// requests the OS to commit physical pages of memory to the the address space.
+// this address space must be a full or subsection of the reserved address space with das_virt_mem_reserve.
+// the memory in the commited address space will be zeroed after calling this function.
+//
+// @param addr: the start address of the memory you wish to commit.
+//              must be a aligned to whatever das_virt_mem_page_size returns.
+//              this is not guaranteed and is only used as hint.
+//              NULL will not be used as a hint.
+//
+// @param size: the size in bytes you wish to reserve from the @param(addr)
+//             must be a aligned to whatever das_virt_mem_page_size returns.
+//
+// @param protection: what the memory is allowed to be used for
+//
+DasBool das_virt_mem_commit(void* addr, uintptr_t size, DasVirtMemProtection protection);
+
+//
+// change the protection of a range of memory.
+// this memory must have been reserved with das_virt_mem_reserve.
+//
+// @param addr: the start of the pages you wish to change the protection for.
+//             must be a aligned to whatever das_virt_mem_page_size returns.
+//
+// @param size: the size in bytes of the memory you wish to change protection for.
+//             must be a aligned to whatever das_virt_mem_page_size returns.
+//
+// @param protection: what the memory is allowed to be used for
+//
+DasBool das_virt_mem_protection_set(void* addr, uintptr_t size, DasVirtMemProtection protection);
+
+//
+// gives the memory back to the OS but will keep the address space reserved
+//
+// @param addr: the start of the pages you wish to decommit.
+//             must be a aligned to whatever das_virt_mem_page_size returns.
+//
+// @param size: the size in bytes of the memory you wish to release.
+//             must be a aligned to whatever das_virt_mem_page_size returns.
+//
+DasBool das_virt_mem_decommit(void* addr, uintptr_t size);
+
+//
+// gives the pages reserved back to the OS. the address range must have be reserved with das_virt_mem_reserve.
+// you can target sub pages of the original allocation but just make sure the parameters are aligned.
+//
+// @param addr: the start of the pages you wish to release.
+//             must be a aligned to whatever das_virt_mem_page_size returns.
+//
+// @param size: the size in bytes of the memory you wish to release.
+//             must be a aligned to whatever das_virt_mem_page_size returns.
+//
+DasBool das_virt_mem_release(void* addr, uintptr_t size);
+
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+typedef int DasVirtMemFileHandle;
+#else
+#error "TODO implement virtual memory for this platform"
+#endif
+
+//
+// maps a file at the path @param(path) into memory.
+// you must use das_virt_mem_release before calling
+// das_virt_mem_map_file_close when you are finished with the memory mapped file.
+//
+//
+// @param path: the start of the pages you wish to release.
+//             must be a aligned to whatever das_virt_mem_page_size returns.
+//
+// @param protection: what the memory is allowed to be used for
+//
+// @param size_out: apon success, this parameter will be set to the size of the the file
+//
+// @param file_handle_out: apon success, this parameter will be set to the file handle
+//                         that you can use to close the file with.
+//
+// @return: NULL on failure, otherwise the address pointing to the start of the memory mapped file is returned.
+//          if errored you can get the error by calling das_virt_mem_get_last_error() directly after this call.
+//
+void* das_virt_mem_map_file(char* path, DasVirtMemProtection protection, uintptr_t* size_out, DasVirtMemFileHandle* file_handle_out);
+
+//
+// closes the file that was mapped with das_virt_mem_map_file
+// all parameters used where returned from the original call to das_virt_mem_map_file.
+//
+// @param addr: the address.
+//
+// @param size: the size of the file.
+//
+// @param file_handle: the handle of the file.
+//
+// @return: das_false on failure, otherwise das_true is returned.
+//          if errored you can get the error by calling das_virt_mem_get_last_error() directly after this call.
+//
+DasBool das_virt_mem_map_file_close(void* addr, uintptr_t size, DasVirtMemFileHandle file_handle);
 
 #endif
 

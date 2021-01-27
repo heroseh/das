@@ -247,10 +247,237 @@ void alloc_test() {
 	das_dealloc_array(int, alctor, ints, 400);
 }
 
+typedef struct {
+	void* address_space;
+	uintptr_t pos;
+	uintptr_t commited_size;
+	uintptr_t commit_grow_size;
+	uintptr_t reserved_size;
+	uintptr_t page_size;
+} VirtMemLinearAlctor;
+
+void VirtMemLinearAlctor_init(VirtMemLinearAlctor* alctor, uintptr_t reserved_size, uintptr_t commit_grow_size) {
+	uintptr_t page_size = das_virt_mem_page_size();
+	//
+	// commit_grow_size and reserved_size must be a multiple of the page size
+	// the reserved_size the be a multiple of the commit_grow_size.
+	commit_grow_size = das_round_up_nearest_multiple_u(commit_grow_size, page_size);
+	reserved_size = das_round_up_nearest_multiple_u(reserved_size, page_size);
+	reserved_size = das_round_up_nearest_multiple_u(reserved_size, commit_grow_size);
+	alctor->address_space = das_virt_mem_reserve(NULL, reserved_size);
+	alctor->pos = 0;
+	alctor->commited_size = 0;
+	alctor->commit_grow_size = commit_grow_size;
+	alctor->reserved_size = reserved_size;
+	alctor->page_size = page_size;
+}
+
+DasBool _VirtMemLinearAlctor_commit_next_chunk(VirtMemLinearAlctor* alctor) {
+	if (alctor->commited_size == alctor->reserved_size) {
+		// linear alloctor reserved_size has been exhausted.
+		// there is no more memory to commit.
+		return das_false;
+	} else {
+		//
+		// commit the next pages of memory using the grow size the linear allocator was initialized with.
+		void* next_pages_start = das_ptr_add(alctor->address_space, alctor->commited_size);
+		das_virt_mem_commit(next_pages_start, alctor->commit_grow_size, DasVirtMemProtection_read_write);
+		alctor->commited_size += alctor->commit_grow_size;
+		return das_true;
+	}
+}
+
+void* VirtMemLinearAlctor_alloc_fn(void* alctor_data, void* ptr, uintptr_t old_size, uintptr_t size, uintptr_t align) {
+	VirtMemLinearAlctor* alctor = (VirtMemLinearAlctor*)alctor_data;
+	if (!ptr && size == 0) {
+		// reset by decommiting the memory back to the OS but retaining the reserved address space.
+		das_virt_mem_decommit(alctor->address_space, alctor->commited_size);
+		alctor->pos = 0;
+		alctor->commited_size = 0;
+	} else if (!ptr) {
+		// allocate
+		while (1) {
+			//
+			// get the next pointer and align it
+			ptr = das_ptr_add(alctor->address_space, alctor->pos);
+			ptr = das_ptr_round_up_align(ptr, align);
+			uint32_t next_pos = das_ptr_diff(ptr, alctor->address_space) + size;
+			if (next_pos <= alctor->commited_size) {
+				//
+				// success, the requested size can fit in the linear block of memory.
+				alctor->pos = next_pos;
+				return ptr;
+			} else {
+				//
+				// failure, not enough room in the linear block of memory that is commited.
+				// so lets try to commit more memory.
+				if (!_VirtMemLinearAlctor_commit_next_chunk(alctor))
+					return NULL;
+			}
+		}
+	} else if (ptr && size > 0) {
+		// reallocate
+
+		// check if the ptr is the last allocation to resize in place
+		if (das_ptr_add(alctor->address_space, alctor->pos - old_size) == ptr) {
+			while (1) {
+				uint32_t next_pos = das_ptr_diff(ptr, alctor->address_space) + size;
+				if (next_pos <= alctor->commited_size) {
+					alctor->pos = next_pos;
+					return ptr;
+				} else {
+					//
+					// failure, not enough room in the linear block of memory that is commited.
+					// so lets try to commit more memory.
+					if (!_VirtMemLinearAlctor_commit_next_chunk(alctor))
+						return NULL;
+				}
+			}
+		}
+
+		// if we cannot extend in place, then just allocate a new block.
+		void* new_ptr = VirtMemLinearAlctor_alloc_fn(alctor, NULL, 0, size, align);
+		if (new_ptr == NULL) { return NULL; }
+
+		memcpy(new_ptr, ptr, size < old_size ? size : old_size);
+		return new_ptr;
+	} else {
+		// deallocate
+		// do nothing
+		return NULL;
+	}
+
+	return NULL;
+}
+
+DasAlctor VirtMemLinearAlctor_as_das(VirtMemLinearAlctor* alctor) {
+	return (DasAlctor){ .fn = VirtMemLinearAlctor_alloc_fn, .data = alctor };
+}
+
+void virt_mem_tests() {
+	uintptr_t page_size = das_virt_mem_page_size();
+
+	//
+	// tests that need to fail cannot be checked without
+	// segfault handlers and this is messy across different OSs.
+	// maybe in the future we can do this. but not now.
+	// so for now just increment this macro and manually test these.
+	// maybe this can be passed through in the command-line with the -D flags.
+#define RUN_FAIL_TEST 0
+
+	//
+	// reserved MBs and grow by commiting KBs at a time
+	VirtMemLinearAlctor la_alctor = {0};
+	uintptr_t reserved_size = page_size * 1024;
+	uintptr_t commit_grow_size = page_size;
+	VirtMemLinearAlctor_init(&la_alctor, reserved_size, commit_grow_size);
+
+	DasAlctor alctor = VirtMemLinearAlctor_as_das(&la_alctor);
+
+#if RUN_FAIL_TEST == 1
+	//
+	// writing this byte will crash since memory has not been commited
+	printf("RUN_FAIL_TEST %u: we should get a SIGSEGV here\n", RUN_FAIL_TEST);
+	memset(la_alctor.address_space, 0xac, 1);
+#endif
+
+	//
+	// this tests reserved memory and then committing it later
+	void* ptr = das_alloc(alctor, commit_grow_size * 2, 1);
+	memset(ptr, 0xac, commit_grow_size * 2);
+
+#if RUN_FAIL_TEST == 2
+	printf("RUN_FAIL_TEST %u: we should get a SIGSEGV here\n", RUN_FAIL_TEST);
+	// writing 1 more byte over will crash the program
+	memset(ptr, 0xac, commit_grow_size * 2 + 1);
+#endif
+
+	//
+	// reset the allocator.
+	// this will decommit all the pages and start from the beginning
+	das_alloc_reset(alctor);
+
+#if RUN_FAIL_TEST == 3
+	printf("RUN_FAIL_TEST %u: we should get a SIGSEGV here\n", RUN_FAIL_TEST);
+	//
+	// writing this byte will crash since memory has been decommitted
+	memset(la_alctor.address_space, 0xac, 1);
+#endif
+
+	//
+	// this tests committing the memory that we previously decommitted.
+	ptr = das_alloc(alctor, commit_grow_size * 2, 1);
+	das_assert(ptr == la_alctor.address_space, "reset should make our allocator start from the beginning again");
+	for (uintptr_t i = 0; i < commit_grow_size * 2; i += 1) {
+		uint8_t byte = *(uint8_t*)das_ptr_add(ptr, i);
+		das_assert(
+			byte == 0,
+			"memory should be zero after we decommit and commit the memory again... got 0x%x at %zu",
+			byte, i
+		);
+	}
+
+
+	//
+	// committing 3 pages and marking the middle as read only
+	ptr = das_virt_mem_reserve(NULL, page_size * 3);
+	das_virt_mem_commit(ptr, page_size * 3, DasVirtMemProtection_read_write);
+	void* first_page = ptr;
+	void* middle_page = das_ptr_add(ptr, page_size);
+	void* last_page = das_ptr_add(ptr, page_size * 2);
+	das_virt_mem_protection_set(middle_page, page_size, DasVirtMemProtection_read);
+
+	//
+	// test writing to the surrounding pages that have read write access.
+	memset(first_page, 0xac, page_size);
+	memset(last_page, 0xac, page_size);
+
+	//
+	// test reading from the middle page as the protection should be read only
+	das_assert(*(uint8_t*)middle_page == 0, "newly commited memory should be 0");
+
+#if RUN_FAIL_TEST == 4
+	printf("RUN_FAIL_TEST %u: we should get a SIGSEGV here\n", RUN_FAIL_TEST);
+	//
+	// writing this byte will crash since memory it has read only protection
+	memset(middle_page, 0xac, 1);
+#endif
+
+	//
+	// release the memory and unreserve the address space
+	das_virt_mem_release(ptr, page_size * 3);
+
+#if RUN_FAIL_TEST == 5
+	printf("RUN_FAIL_TEST %u: we should get a SIGSEGV here\n", RUN_FAIL_TEST);
+	//
+	// writing this byte will crash since memory it has been released/unmapped
+	memset(first_page, 0xac, 1);
+#endif
+
+	//
+	// test mapping the file of the source code of this executable and reading the first line.
+	uintptr_t this_file_size;
+	DasVirtMemFileHandle this_file_handle;
+	void* this_file_mem = das_virt_mem_map_file("das_test.c", DasVirtMemProtection_read, &this_file_size, &this_file_handle);
+	das_assert(this_file_mem != NULL, "failed to map the source file of the executable");
+	char* first_line_of_code = "#include \"das.h\"";
+	das_assert(
+		strncmp(this_file_mem, first_line_of_code, strlen(first_line_of_code)) == 0,
+		"failed testing mapping the source code of the exe and reading the first line");
+
+
+	das_assert(
+		das_virt_mem_map_file_close(this_file_mem, this_file_size, this_file_handle),
+		"failed testing closing the memory mapped file of the source code");
+
+#undef RUN_FAIL_TEST
+}
+
 int main(int argc, char** argv) {
 	alloc_test();
 	stk_test();
 	deque_test();
+	virt_mem_tests();
 
 	printf("all tests were successful\n");
 	return 0;
