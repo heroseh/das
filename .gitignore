@@ -1,0 +1,12 @@
+*.exe
+*.ilk
+*.pdb
+benchmark/*.exe
+benchmark/*.ilk
+benchmark/*.pdb
+benchmark/das_main
+benchmark/cpp_vector_main
+benchmark/cpp_vector_trio_main
+das_test
+das_examples
+main
