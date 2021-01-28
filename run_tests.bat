@@ -1,5 +1,5 @@
 @ECHO OFF
-ECHO running das_test...
+ECHO running das_test with clang...
 IF EXIST "das_test.exe" (
 	DEL das_test.exe
 )
@@ -10,15 +10,14 @@ IF EXIST "das_test.exe" (
 	das_test.exe
 )
 
-ECHO -----------------
-ECHO running cpp_das_test...
-IF EXIST "cpp_das_test.exe" (
-	DEL cpp_das_test.exe
+ECHO running das_test with Visual Studio cl...
+IF EXIST "das_test.exe" (
+	DEL das_test.exe
 )
 
-clang++.exe -g -o cpp_das_test.exe cpp_das_test.cpp
+cl.exe das_test.c
 
-IF EXIST "cpp_das_test.exe" (
-	cpp_das_test.exe
+IF EXIST "das_test.exe" (
+	das_test.exe
 )
 

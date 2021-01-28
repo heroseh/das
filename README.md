@@ -24,7 +24,7 @@ it will only work through extensions as lots of C99 features do not work in ISO 
 Patches are welcome to improve support for other compilers and language targets :)
 
 Tested Platforms:
-- Windows (clang)
+- Windows (visual studio (cl), clang)
 - Linux (clang & gcc & tcc)
 - MacOS (clang) - untested but should work since it's clang. let me know if you can test it!
 - IOS (clang) - untested but should work since it's clang. let me know if you can test it!
