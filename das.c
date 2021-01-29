@@ -571,102 +571,306 @@ uintptr_t _DasDeque_pop_back_many(_DasDequeHeader* header, uintptr_t elmts_count
 // ===========================================================================
 //
 //
+// Platform Error Handling
+//
+//
+// ===========================================================================
+
+DasError _das_get_last_error() {
+#ifdef __linux__
+	return errno;
+#elif _WIN32
+    return GetLastError();
+#else
+#error "unimplemented virtual memory API for this platform"
+#endif
+}
+
+DasErrorStrRes das_get_error_string(DasError error, char* buf_out, uint32_t buf_out_len) {
+#if _WIN32
+	DWORD res = FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, error, 0, (LPTSTR)buf_out, buf_out_len, NULL);
+	if (res == 0) {
+		error = GetLastError();
+		das_abort("TODO handle error code: %u", error);
+	}
+#elif _GNU_SOURCE
+	// GNU version (screw these guys for changing the way this works)
+	char* buf = strerror_r(error, buf_out, buf_out_len);
+	if (strcmp(buf, "Unknown error") == 0) {
+		return DasErrorStrRes_invalid_error_arg;
+	}
+
+	// if its static string then copy it to the buffer
+	if (buf != buf_out) {
+		strncpy(buf_out, buf, buf_out_len);
+
+		uint32_t len = strlen(buf);
+		if (len < buf_out_len) {
+			return DasErrorStrRes_not_enough_space_in_buffer;
+		}
+	}
+#elif defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+	// use the XSI standard behavior.
+	int res = strerror_r(error, buf_out, buf_out_len);
+	if (res != 0) {
+		int errnum = res;
+		if (res == -1)
+			errnum = errno;
+
+		if (errnum == EINVAL) {
+			return DasErrorStrRes_invalid_error_arg;
+		} else if (errnum == ERANGE) {
+			return DasErrorStrRes_not_enough_space_in_buffer;
+		}
+		das_abort("unexpected errno: %u", errnum);
+	}
+#else
+#error "unimplemented virtual memory error string"
+#endif
+	return DasErrorStrRes_success;
+}
+
+// ===========================================================================
+//
+//
 // File Abstraction
 //
 //
 // ===========================================================================
 
-DasBool das_file_open(char* path, DasFileAccess access, DasFileFlags flags, DasFileHandle* file_handle_out) {
+DasError das_file_open(char* path, DasFileFlags flags, DasFileHandle* file_handle_out) {
+	das_assert(
+		(flags & (DasFileFlags_read | DasFileFlags_write | DasFileFlags_append)),
+		"DasFileFlags_{read, write or append} must be set when opening a file"
+	);
+
+	das_assert(
+		(flags & (DasFileFlags_write | DasFileFlags_append))
+			|| !(flags & (DasFileFlags_create_if_not_exist | DasFileFlags_create_new | DasFileFlags_truncate)),
+		"file must be opened with DasFileFlags_{write or append} if DasFileFlags_{create_if_not_exist, create_new or truncate} exists"
+	);
+
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
-	int fd_flags = 0;
-	switch (access) {
-		case DasFileAccess_read:
-			fd_flags = O_RDONLY;
-			break;
-		case DasFileAccess_write:
-			fd_flags = O_WRONLY;
-			break;
-		case DasFileAccess_read_write:
-			fd_flags = O_RDWR;
-			break;
+	int fd_flags = O_CLOEXEC;
+
+	if (flags & DasFileFlags_create_new) {
+		fd_flags |= O_CREAT | O_EXCL;
+	} else {
+		if (flags & DasFileFlags_create_if_not_exist) {
+			fd_flags |= O_CREAT;
+		}
+
+		if (flags & DasFileFlags_truncate) {
+			fd_flags |= O_TRUNC;
+		}
 	}
 
-	//
-	// TODO implement flags
-	//
+	if ((flags & DasFileFlags_read) && (flags & DasFileFlags_write)) {
+		fd_flags |= O_RDWR;
+		if (flags & DasFileFlags_append) {
+			fd_flags |= O_APPEND;
+		}
+	} else if (flags & DasFileFlags_read) {
+		fd_flags |= O_RDONLY;
+	} else if (flags & DasFileFlags_write) {
+		fd_flags |= O_WRONLY;
+		if (flags & DasFileFlags_append) {
+			fd_flags |= O_APPEND;
+		}
+	}
 
-	int fd = open(path, fd_flags);
-	if (fd == -1) return das_false;
+	mode_t mode = 0666; // TODO allow the user to supply a mode.
+	int fd = open(path, fd_flags, mode);
+	if (fd == -1) return _das_get_last_error();
 
-	*file_handle_out = fd;
-	return das_true;
+	*file_handle_out = (DasFileHandle) { .raw = fd };
 #elif _WIN32
 	DWORD win_access = 0;
-	switch (access) {
-		case DasFileAccess_read:
-			win_access = GENERIC_READ;
-			break;
-		case DasFileAccess_write:
-			win_access = GENERIC_WRITE;
-			break;
-		case DasFileAccess_read_write:
-			win_access = GENERIC_READ | GENERIC_WRITE;
-			break;
+	DWORD win_creation = 0;
+
+	if (flags & DasFileFlags_create_new) {
+		win_creation |= CREATE_NEW;
+	} else {
+		if ((flags & DasFileFlags_create_if_not_exist) && (flags & DasFileFlags_truncate)) {
+			win_creation |= CREATE_ALWAYS;
+		} else if (flags & DasFileFlags_create_if_not_exist) {
+			win_creation |= OPEN_ALWAYS;
+		} else if (flags & DasFileFlags_truncate) {
+			win_creation |= TRUNCATE_EXISTING;
+		}
 	}
 
-	HANDLE handle = CreateFile(path, win_access, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
-	if (handle == INVALID_HANDLE_VALUE)
-		return das_false;
+	if (win_creation == 0)
+		win_creation = OPEN_EXISTING;
 
-	*file_handle_out = handle;
-	return das_true;
+	if (flags & DasFileFlags_read) {
+		win_access |= GENERIC_READ;
+	}
+
+	if (flags & DasFileFlags_write) {
+		if (flags & DasFileFlags_append) {
+			win_access |= FILE_GENERIC_WRITE & ~FILE_WRITE_DATA;
+		} else {
+			win_access |= GENERIC_WRITE;
+		}
+	}
+
+	HANDLE handle = CreateFileA(path, win_access, 0, NULL, win_creation, FILE_ATTRIBUTE_NORMAL, 0);
+	if (handle == INVALID_HANDLE_VALUE)
+		return _das_get_last_error();
+
+	*file_handle_out = (DasFileHandle) { .raw = handle };
 #endif
+
+	return DasError_success;
 }
 
-DasBool das_file_close(DasFileHandle handle) {
+DasError das_file_close(DasFileHandle handle) {
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
-	return close(handle) == 0;
+	if (close(handle.raw) != 0)
+		return _das_get_last_error();
 #elif _WIN32
-	return CloseHandle(handle) != 0;
+	if (CloseHandle(handle.raw) == 0)
+		return _das_get_last_error();
 #else
 #error "unimplemented file API for this platform"
 #endif
+
+	return DasError_success;
 }
 
-uint64_t das_file_size(DasFileHandle handle) {
+DasError das_file_size(DasFileHandle handle, uint64_t* size_out) {
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
 	// get the size of the file
 	struct stat s = {};
-	if (fstat(handle, &s) != 0) return 0;
-	return s.st_size;
+	if (fstat(handle.raw, &s) != 0) return _das_get_last_error();
+	*size_out = s.st_size;
 #elif _WIN32
 	LARGE_INTEGER size;
-	BOOL success = GetFileSizeEx(handle, &size);
-	if (!success) return 0;
-	return size.QuadPart;
+	if (!GetFileSizeEx(handle.raw, &size)) return _das_get_last_error();
+	*size_out = size.QuadPart;
 #else
 #error "unimplemented file API for this platform"
 #endif
+	return DasError_success;
 }
 
-uintptr_t das_file_read(DasFileHandle handle, void* data_out, uintptr_t length) {
+DasError das_file_read(DasFileHandle handle, void* data_out, uintptr_t length, uintptr_t* bytes_read_out) {
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
-	return read(handle, data_out, length);
+	ssize_t bytes_read = read(handle.raw, data_out, length);
+	if (bytes_read == (ssize_t)-1)
+		return _das_get_last_error();
 #elif _WIN32
-	das_abort("unimplemented");
+	length = das_min_u(length, UINT32_MAX);
+	DWORD bytes_read;
+	if (ReadFile(handle.raw, data_out, length, &bytes_read, NULL) == 0)
+		return _das_get_last_error();
 #else
 #error "unimplemented file API for this platform"
 #endif
+
+	*bytes_read_out = bytes_read;
+	return DasError_success;
 }
 
-uintptr_t das_file_write(DasFileHandle handle, void* data, uintptr_t length) {
+DasError das_file_read_exact(DasFileHandle handle, void* data_out, uintptr_t length, uintptr_t* bytes_read_out) {
+	uintptr_t og_length = length;
+	while (length) {
+		uintptr_t bytes_read;
+		DasError error = das_file_read(handle, data_out, length, &bytes_read);
+		if (error) return error;
+
+		if (bytes_read == 0)
+			break;
+
+		data_out = das_ptr_add(data_out, bytes_read);
+		length -= bytes_read;
+	}
+
+	*bytes_read_out = og_length - length;
+	return DasError_success;
+}
+
+DasError das_file_write(DasFileHandle handle, void* data, uintptr_t length, uintptr_t* bytes_written_out) {
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
-	return write(handle, data, length);
+	ssize_t bytes_written = write(handle.raw, data, length);
+	if (bytes_written == (ssize_t)-1)
+		return _das_get_last_error();
 #elif _WIN32
-	das_abort("unimplemented");
+	length = das_min_u(length, UINT32_MAX);
+	DWORD bytes_written;
+	if (WriteFile(handle.raw, data, length, &bytes_written, NULL) == 0)
+		return _das_get_last_error();
 #else
 #error "unimplemented file API for this platform"
 #endif
+
+	*bytes_written_out = bytes_written;
+	return DasError_success;
+}
+
+DasError das_file_write_exact(DasFileHandle handle, void* data, uintptr_t length, uintptr_t* bytes_written_out) {
+	uintptr_t og_length = length;
+	while (length) {
+		uintptr_t bytes_written;
+		DasError error = das_file_write(handle, data, length, &bytes_written);
+		if (error) return error;
+
+		if (bytes_written == 0)
+			break;
+
+		data = das_ptr_add(data, bytes_written);
+		length -= bytes_written;
+	}
+
+	*bytes_written_out = og_length - length;
+	return DasError_success;
+}
+
+DasError das_file_seek(DasFileHandle handle, int64_t offset, DasFileSeekFrom from, uint64_t* cursor_offset_out) {
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+	int whence = 0;
+	switch (from) {
+		case DasFileSeekFrom_start: whence = SEEK_SET; break;
+		case DasFileSeekFrom_current: whence = SEEK_CUR; break;
+		case DasFileSeekFrom_end: whence = SEEK_END; break;
+	}
+	off_t cursor_offset = lseek(handle.raw, offset, whence);
+	if (cursor_offset == (off_t)-1)
+		return _das_get_last_error();
+	*cursor_offset_out = cursor_offset;
+#elif _WIN32
+	int move_method = 0;
+	switch (from) {
+		case DasFileSeekFrom_start: move_method = FILE_BEGIN; break;
+		case DasFileSeekFrom_current: move_method = FILE_CURRENT; break;
+		case DasFileSeekFrom_end: move_method = FILE_END; break;
+	}
+	LARGE_INTEGER distance_to_move;
+	distance_to_move.QuadPart = offset;
+	LARGE_INTEGER new_offset = {0};
+
+	if (!SetFilePointerEx(handle.raw, distance_to_move, &new_offset, move_method))
+		return _das_get_last_error();
+
+	*cursor_offset_out = new_offset.QuadPart;
+#else
+#error "unimplemented file API for this platform"
+#endif
+	return DasError_success;
+}
+
+DasError das_file_flush(DasFileHandle handle) {
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+	if (fsync(handle.raw) != 0)
+		return _das_get_last_error();
+#elif _WIN32
+	if (FlushFileBuffers(handle.raw) == 0)
+		return _das_get_last_error();
+#else
+#error "unimplemented file API for this platform"
+#endif
+	return DasError_success;
 }
 
 // ===========================================================================
@@ -703,81 +907,27 @@ static DWORD _das_virt_mem_prot_windows(DasVirtMemProtection prot) {
 #error "unimplemented virtual memory API for this platform"
 #endif
 
-DasVirtMemError das_virt_mem_get_last_error() {
-#ifdef __linux__
-	return errno;
-#elif _WIN32
-    return GetLastError();
-#else
-#error "unimplemented virtual memory API for this platform"
-#endif
-}
-
-DasVirtMemErrorStrRes das_virt_mem_get_error_string(DasVirtMemError error, char* buf_out, uint32_t buf_out_len) {
-#if _WIN32
-	DWORD res = FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, error, 0, (LPTSTR)buf_out, buf_out_len, NULL);
-	if (res == 0) {
-		error = GetLastError();
-		das_abort("TODO handle error code: %u", error);
-	}
-#elif _GNU_SOURCE
-	// GNU version (screw these guys for changing the way this works)
-	char* buf = strerror_r(error, buf_out, buf_out_len);
-	if (strcmp(buf, "Unknown error") == 0) {
-		return DasVirtMemErrorStrRes_invalid_error_arg;
-	}
-
-	// if its static string then copy it to the buffer
-	if (buf != buf_out) {
-		strncpy(buf_out, buf, buf_out_len);
-
-		uint32_t len = strlen(buf);
-		if (len < buf_out_len) {
-			return DasVirtMemErrorStrRes_not_enough_space_in_buffer;
-		}
-	}
-#elif defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
-	// use the XSI standard behavior.
-	int res = strerror_r(error, buf_out, buf_out_len);
-	if (res != 0) {
-		int errnum = res;
-		if (res == -1)
-			errnum = errno;
-
-		if (errnum == EINVAL) {
-			return DasVirtMemErrorStrRes_invalid_error_arg;
-		} else if (errnum == ERANGE) {
-			return DasVirtMemErrorStrRes_not_enough_space_in_buffer;
-		}
-		das_abort("unexpected errno: %u", errnum);
-	}
-#else
-#error "unimplemented virtual memory error string"
-#endif
-	return DasVirtMemErrorStrRes_success;
-}
-
-DasBool das_virt_mem_page_size(uintptr_t* page_size_out, uintptr_t* reserve_align_out) {
+DasError das_virt_mem_page_size(uintptr_t* page_size_out, uintptr_t* reserve_align_out) {
 #ifdef __linux__
 	long page_size = sysconf(_SC_PAGESIZE);
-	if (page_size ==  -1)
-		return das_false;
+	if (page_size ==  (long)-1)
+		return _das_get_last_error();
 
 	*page_size_out = page_size;
 	*reserve_align_out = page_size;
-	return das_true;
 #elif _WIN32
 	SYSTEM_INFO si;
-    GetSystemInfo(&si);
+    GetNativeSystemInfo(&si);
 	*page_size_out = si.dwPageSize;
 	*reserve_align_out = si.dwAllocationGranularity;
-	return das_true;
 #else
 #error "unimplemented virtual memory API for this platform"
 #endif
+
+	return DasError_success;
 }
 
-void* das_virt_mem_reserve(void* requested_addr, uintptr_t size) {
+DasError das_virt_mem_reserve(void* requested_addr, uintptr_t size, void** addr_out) {
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
 	// memory is automatically commited on Unix based OSs,
 	// so we will restrict the memory from being accessed on reserved.
@@ -787,83 +937,102 @@ void* das_virt_mem_reserve(void* requested_addr, uintptr_t size) {
 	// MAP_PRIVATE = keep memory private so child process cannot access them
 	// MAP_NORESERVE = do not reserve any swap space for this mapping
 	void* addr = mmap(requested_addr, size, prot, MAP_ANON | MAP_PRIVATE | MAP_NORESERVE, -1, 0);
-	return addr == MAP_FAILED ? NULL : addr;
+	if (addr == MAP_FAILED)
+		return _das_get_last_error();
 #elif _WIN32
-	return VirtualAlloc(requested_addr, size, MEM_RESERVE, PAGE_NOACCESS);
+	void* addr = VirtualAlloc(requested_addr, size, MEM_RESERVE, PAGE_NOACCESS);
+	if (addr == NULL)
+		return _das_get_last_error();
 #else
 #error "TODO implement virtual memory for this platform"
 #endif
+
+	*addr_out = addr;
+	return DasError_success;
 }
 
-DasBool das_virt_mem_commit(void* addr, uintptr_t size, DasVirtMemProtection protection) {
+DasError das_virt_mem_commit(void* addr, uintptr_t size, DasVirtMemProtection protection) {
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
 	// memory is automatically commited on Unix based OSs,
 	// memory is restricted from being accessed in our das_virt_mem_reserve.
 	// so lets just apply the protection for the address space.
 	// and then advise the OS that these pages will be used soon.
 	int prot = _das_virt_mem_prot_unix(protection);
-	if (mprotect(addr, size, prot) != 0) return das_false;
-	return madvise(addr, size, MADV_WILLNEED) == 0;
+	if (mprotect(addr, size, prot) != 0) return _das_get_last_error();
+	if (madvise(addr, size, MADV_WILLNEED) != 0) return _das_get_last_error();
 #elif _WIN32
 	DWORD prot = _das_virt_mem_prot_windows(protection);
-	return VirtualAlloc(addr, size, MEM_COMMIT, prot) != NULL;
+	if (VirtualAlloc(addr, size, MEM_COMMIT, prot) == NULL)
+		return _das_get_last_error();
 #else
 #error "TODO implement virtual memory for this platform"
 #endif
+	return DasError_success;
 }
 
-DasBool das_virt_mem_protection_set(void* addr, uintptr_t size, DasVirtMemProtection protection) {
+DasError das_virt_mem_protection_set(void* addr, uintptr_t size, DasVirtMemProtection protection) {
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
 	int prot = _das_virt_mem_prot_unix(protection);
-	return mprotect(addr, size, prot) == 0;
+	if (mprotect(addr, size, prot) != 0)
+		return _das_get_last_error();
 #elif _WIN32
 	DWORD prot = _das_virt_mem_prot_windows(protection);
 	DWORD old_prot; // unused
-	return VirtualProtect(addr, size, prot, &old_prot) != 0;
+	if (!VirtualProtect(addr, size, prot, &old_prot))
+		return _das_get_last_error();
 #else
 #error "TODO implement virtual memory for this platform"
 #endif
+	return DasError_success;
 }
 
-DasBool das_virt_mem_decommit(void* addr, uintptr_t size) {
+DasError das_virt_mem_decommit(void* addr, uintptr_t size) {
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
 
 	//
 	// advise the OS that these pages will not be needed.
 	// the OS will zero fill these pages before you next access them.
-	if (madvise(addr, size, MADV_DONTNEED) != 0) return das_false;
+	if (madvise(addr, size, MADV_DONTNEED) != 0)
+		return _das_get_last_error();
 
 	// memory is automatically commited on Unix based OSs,
 	// so we will restrict the memory from being accessed when we "decommit.
 	int prot = 0;
-	return mprotect(addr, size, prot) == 0;
+	if (mprotect(addr, size, prot) != 0)
+		return _das_get_last_error();
 #elif _WIN32
-	return VirtualFree(addr, size, MEM_DECOMMIT) != 0;
+	if (VirtualFree(addr, size, MEM_DECOMMIT) == 0)
+		return _das_get_last_error();
 #else
 #error "TODO implement virtual memory for this platform"
 #endif
+	return DasError_success;
 }
 
-DasBool das_virt_mem_release(void* addr, uintptr_t size) {
+DasError das_virt_mem_release(void* addr, uintptr_t size) {
 #ifdef __linux__
-	return munmap(addr, size) == 0;
+	if (munmap(addr, size) != 0)
+		return _das_get_last_error();
 #elif _WIN32
 	//
 	// unfortunately on Windows all memory must be release at once
 	// that was reserved with VirtualAlloc.
-	return VirtualFree(addr, 0, MEM_RELEASE) != 0;
+	if (!VirtualFree(addr, 0, MEM_RELEASE))
+		return _das_get_last_error();
 #else
 #error "TODO implement virtual memory for this platform"
 #endif
+	return DasError_success;
 }
 
-void* das_virt_mem_map_file(void* requested_addr, DasFileHandle file_handle, DasVirtMemProtection protection, uint64_t offset, uintptr_t size, DasMapFileHandle* map_file_handle_out) {
+DasError das_virt_mem_map_file(void* requested_addr, DasFileHandle file_handle, DasVirtMemProtection protection, uint64_t offset, uintptr_t size, void** addr_out, DasMapFileHandle* map_file_handle_out) {
 	das_assert(protection != DasVirtMemProtection_no_access, "cannot map a file with no access");
 
 	uintptr_t reserve_align;
 	uintptr_t page_size;
-	if (!das_virt_mem_page_size(&page_size, &reserve_align))
-		return NULL;
+	DasError error = das_virt_mem_page_size(&page_size, &reserve_align);
+	if (error) return error;
+
 	//
 	// round down the offset to the nearest multiple of reserve_align
 	//
@@ -875,7 +1044,9 @@ void* das_virt_mem_map_file(void* requested_addr, DasFileHandle file_handle, Das
 	int prot = _das_virt_mem_prot_unix(protection);
 
 	size = das_round_up_nearest_multiple_u(size, page_size);
-	void* addr = mmap(requested_addr, size, prot, MAP_SHARED, file_handle, offset);
+	void* addr = mmap(requested_addr, size, prot, MAP_SHARED, file_handle.raw, offset);
+	if (addr == MAP_FAILED)
+		return _das_get_last_error();
 #elif _WIN32
 
 	DWORD prot = _das_virt_mem_prot_windows(protection);
@@ -884,9 +1055,9 @@ void* das_virt_mem_map_file(void* requested_addr, DasFileHandle file_handle, Das
 	DWORD size_low = size;
 
 	// create a file mapping object for the file
-	HANDLE map_file_handle = CreateFileMappingA(file_handle, NULL, prot, 0, 0, NULL);
+	HANDLE map_file_handle = CreateFileMappingA(file_handle.raw, NULL, prot, 0, 0, NULL);
 	if (map_file_handle == NULL)
-		return NULL;
+		return _das_get_last_error();
 	*map_file_handle_out = map_file_handle;
 
 	DWORD access = 0;
@@ -905,25 +1076,25 @@ void* das_virt_mem_map_file(void* requested_addr, DasFileHandle file_handle, Das
 	DWORD offset_low = offset;
 
 	void* addr = MapViewOfFile(map_file_handle, access, offset_high, offset_low, size);
+	if (addr == NULL)
+		return _das_get_last_error();
 #else
 #error "TODO implement virtual memory for this platform"
 #endif
 
-	if (addr == NULL)
-		return NULL;
-
 	//
 	// move the pointer to where the user's request offset into the file will be.
 	addr = das_ptr_add(addr, offset_diff);
+	*addr_out = addr;
 
-	return addr;
+	return DasError_success;
 }
 
-DasBool das_virt_mem_unmap_file(void* addr, uintptr_t size, DasMapFileHandle map_file_handle) {
+DasError das_virt_mem_unmap_file(void* addr, uintptr_t size, DasMapFileHandle map_file_handle) {
 	uintptr_t reserve_align;
 	uintptr_t page_size;
-	if (!das_virt_mem_page_size(&page_size, &reserve_align))
-		return das_false;
+	DasError error = das_virt_mem_page_size(&page_size, &reserve_align);
+	if (error) return error;
 
 	//
 	// when mapping a file the user is given an offset from the start of the range pages that are mapped
@@ -937,12 +1108,12 @@ DasBool das_virt_mem_unmap_file(void* addr, uintptr_t size, DasMapFileHandle map
 #elif _WIN32
 
 	if (!UnmapViewOfFile(addr))
-		return das_false;
+		return _das_get_last_error();
 
 	if (!CloseHandle(map_file_handle))
-		return das_false;
+		return _das_get_last_error();
 
-	return das_true;
+	return DasError_success;
 #else
 #error "TODO implement virtual memory for this platform"
 #endif

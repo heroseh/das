@@ -255,27 +255,27 @@ typedef struct {
 	uintptr_t reserved_size;
 } VirtMemLinearAlctor;
 
-DasBool VirtMemLinearAlctor_init(VirtMemLinearAlctor* alctor, uintptr_t reserved_size, uintptr_t commit_grow_size) {
+DasError VirtMemLinearAlctor_init(VirtMemLinearAlctor* alctor, uintptr_t reserved_size, uintptr_t commit_grow_size) {
 	uintptr_t reserve_align;
 	uintptr_t page_size;
-	if (!das_virt_mem_page_size(&page_size, &reserve_align))
-		return das_false;
+	DasError error = das_virt_mem_page_size(&page_size, &reserve_align);
+	if (error) return error;
 
 	// reserved_size must be a multiple of the reserve_align.
 	// commit_grow_size must be multiple of the page size.
 	commit_grow_size = das_round_up_nearest_multiple_u(commit_grow_size, page_size);
 	reserved_size = das_round_up_nearest_multiple_u(reserved_size, reserve_align);
 	reserved_size = das_round_up_nearest_multiple_u(reserved_size, commit_grow_size);
-	void* address_space = das_virt_mem_reserve(NULL, reserved_size);
-	if (address_space == NULL)
-		return das_false;
+	void* address_space;
+	error = das_virt_mem_reserve(NULL, reserved_size, &address_space);
+	if (error) return error;
 
 	alctor->address_space = address_space;
 	alctor->pos = 0;
 	alctor->commited_size = 0;
 	alctor->commit_grow_size = commit_grow_size;
 	alctor->reserved_size = reserved_size;
-	return das_true;
+	return DasError_success;
 }
 
 DasBool _VirtMemLinearAlctor_commit_next_chunk(VirtMemLinearAlctor* alctor) {
@@ -292,11 +292,9 @@ DasBool _VirtMemLinearAlctor_commit_next_chunk(VirtMemLinearAlctor* alctor) {
 		// make sure the commit grow size does not go past the reserved address_space.
 		uintptr_t grow_size = das_min_u(alctor->commit_grow_size, alctor->reserved_size - alctor->commited_size);
 
-		das_assert(
-			das_virt_mem_commit(next_pages_start, grow_size, DasVirtMemProtection_read_write),
-			"failed to commit memory next_pages_start(%p), grow_size(%zu), error_code(0x%x)",
-			next_pages_start, grow_size, das_virt_mem_get_last_error()
-		);
+		DasError error = das_virt_mem_commit(next_pages_start, grow_size, DasVirtMemProtection_read_write);
+		das_assert(error == 0, "failed to commit memory next_pages_start(%p), grow_size(%zu), error_code(0x%x)",
+			next_pages_start, grow_size, error);
 		alctor->commited_size += grow_size;
 		return das_true;
 	}
@@ -306,7 +304,10 @@ void* VirtMemLinearAlctor_alloc_fn(void* alctor_data, void* ptr, uintptr_t old_s
 	VirtMemLinearAlctor* alctor = (VirtMemLinearAlctor*)alctor_data;
 	if (!ptr && size == 0) {
 		// reset by decommiting the memory back to the OS but retaining the reserved address space.
-		das_virt_mem_decommit(alctor->address_space, alctor->commited_size);
+		DasError error = das_virt_mem_decommit(alctor->address_space, alctor->commited_size);
+		das_assert(error == 0, "failed to decommit memory address_space(%p), commited_size(%zu)",
+			alctor->address_space, alctor->commited_size);
+
 		alctor->pos = 0;
 		alctor->commited_size = 0;
 	} else if (!ptr) {
@@ -372,7 +373,8 @@ DasAlctor VirtMemLinearAlctor_as_das(VirtMemLinearAlctor* alctor) {
 void virt_mem_tests() {
 	uintptr_t reserve_align;
 	uintptr_t page_size;
-	das_virt_mem_page_size(&page_size, &reserve_align);
+	DasError error = das_virt_mem_page_size(&page_size, &reserve_align);
+	das_assert(error == 0, "failed to get the page size: 0x%x", error);
 
 	//
 	// tests that need to fail cannot be checked without
@@ -387,10 +389,8 @@ void virt_mem_tests() {
 	VirtMemLinearAlctor la_alctor = {0};
 	uintptr_t reserved_size = reserve_align * 1024;
 	uintptr_t commit_grow_size = page_size;
-	das_assert(
-		VirtMemLinearAlctor_init(&la_alctor, reserved_size, commit_grow_size),
-		"failed to initial linear allocator"
-	);
+	error = VirtMemLinearAlctor_init(&la_alctor, reserved_size, commit_grow_size);
+	das_assert(error == 0, "failed to initial linear allocator: 0x%x", error);
 
 	DasAlctor alctor = VirtMemLinearAlctor_as_das(&la_alctor);
 
@@ -440,12 +440,12 @@ void virt_mem_tests() {
 	//
 	// committing 3 pages and marking the middle as read only
 	reserved_size = das_round_up_nearest_multiple_u(page_size * 3, reserve_align);
-	ptr = das_virt_mem_reserve(NULL, reserved_size);
-	das_virt_mem_commit(ptr, page_size * 3, DasVirtMemProtection_read_write);
+	error = das_virt_mem_reserve(NULL, reserved_size, &ptr);
+	error = das_virt_mem_commit(ptr, page_size * 3, DasVirtMemProtection_read_write);
 	void* first_page = ptr;
 	void* middle_page = das_ptr_add(ptr, page_size);
 	void* last_page = das_ptr_add(ptr, page_size * 2);
-	das_virt_mem_protection_set(middle_page, page_size, DasVirtMemProtection_read);
+	error = das_virt_mem_protection_set(middle_page, page_size, DasVirtMemProtection_read);
 
 	//
 	// test writing to the surrounding pages that have read write access.
@@ -465,7 +465,7 @@ void virt_mem_tests() {
 
 	//
 	// release the memory and unreserve the address space
-	das_virt_mem_release(ptr, reserved_size);
+	error = das_virt_mem_release(ptr, reserved_size);
 
 #if RUN_FAIL_TEST == 5
 	printf("RUN_FAIL_TEST %u: we should get a SIGSEGV here\n", RUN_FAIL_TEST);
@@ -476,9 +476,8 @@ void virt_mem_tests() {
 
 	char* path = "das_test.c";
 	DasFileHandle file_handle;
-	das_assert(
-		das_file_open(path, DasFileAccess_read, 0, &file_handle),
-		"error opening file at %s", path);
+	error = das_file_open(path, DasFileFlags_read, &file_handle);
+	das_assert(error == 0, "error opening file at %s : 0x%x", path, error);
 
 	//
 	// test mapping the file of the source code of this executable and reading the first line.
@@ -487,21 +486,20 @@ void virt_mem_tests() {
 	uint64_t this_file_map_offset = 1;
 	uintptr_t this_file_map_size = 32;
 	DasMapFileHandle this_file_map_file_handle;
-	void* this_file_mem =
-		das_virt_mem_map_file(
-			NULL, file_handle, DasVirtMemProtection_read,
-			this_file_map_offset, this_file_map_size, &this_file_map_file_handle);
+	void* this_file_mem;
+	error = das_virt_mem_map_file(
+		NULL, file_handle, DasVirtMemProtection_read,
+		this_file_map_offset, this_file_map_size, &this_file_mem, &this_file_map_file_handle);
 
-	das_assert(this_file_mem != NULL, "failed to map the source code of the executable");
+	das_assert(error == 0, "failed to map the source code of the executable");
 	char* first_line_of_code = "include \"das.h\"";
 	das_assert(
 		strncmp(this_file_mem, first_line_of_code, strlen(first_line_of_code)) == 0,
 		"failed testing mapping the source code of the exe and reading the first line");
 
 
-	das_assert(
-		das_virt_mem_unmap_file(this_file_mem, this_file_map_size, this_file_map_file_handle),
-		"failed testing closing the memory mapped file of the source code");
+	error = das_virt_mem_unmap_file(this_file_mem, this_file_map_size, this_file_map_file_handle);
+	das_assert(error == 0, "failed testing closing the memory mapped file of the source code");
 
 	das_file_close(file_handle);
 

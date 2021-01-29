@@ -635,39 +635,218 @@ uintptr_t _DasDeque_pop_back_many(_DasDequeHeader* header, uintptr_t elmts_count
 // ===========================================================================
 //
 //
-// File Abstraction
+// Platform Error Handling
 //
 //
 // ===========================================================================
 
-typedef uint8_t DasFileAccess;
+//
+// 0 means success
+// TODO: this just directly maps to errno on Unix and DWORD GetLastError on Windows.
+// the problem is we cant programatically handle errors in a cross platform way.
+// in future create our own enumeration that contains all the errors.
+// right now the user can just get the string by calling das_get_error_string.
+typedef uint32_t DasError;
+#define DasError_success 0
+
+typedef uint8_t DasErrorStrRes;
 enum {
-	DasFileAccess_read,
-	DasFileAccess_write,
-	DasFileAccess_read_write,
+	DasErrorStrRes_success,
+	DasErrorStrRes_invalid_error_arg,
+	DasErrorStrRes_not_enough_space_in_buffer,
 };
+
+//
+// get the string of @param(error) and writes it into the @param(buf_out) pointer upto @param(buf_out_len)
+// @param(buf_out) is null terminated on success.
+//
+// @return: the result detailing the success or error.
+//
+DasErrorStrRes das_get_error_string(DasError error, char* buf_out, uint32_t buf_out_len);
+
+// ===========================================================================
+//
+//
+// File Abstraction
+//
+//
+// ===========================================================================
+//
+// heavily inspired by the Rust standard library File API.
+// we needed a file abstraction for the virtual memory
+// but it's nice being able to talk directly to the OS
+// instead and have an unbuffered API unlike fread, fwrite.
+//
+//
 
 typedef uint8_t DasFileFlags;
 enum {
-	DasFileFlags_TODO = 0x1,
+	// specifies that the open file can be read from.
+	DasFileFlags_read = 0x1,
+	// specifies that the open file can be written to.
+	// starts the cursor at the start of the file if append is not set.
+	DasFileFlags_write = 0x2,
+	// specifies that the open file can be written to.
+	// the cursor at the end of the file.
+	DasFileFlags_append = 0x4,
+	// truncate an existing file by removing it's contents are starting from 0 bytes.
+	// must be opened with write or append.
+	DasFileFlags_truncate = 0x8,
+	// creates a new file if it does not exist.
+	// must be opened with write or append.
+	DasFileFlags_create_if_not_exist = 0x10,
+	// only creates a new file and errors if the file exists.
+	// enabling this will ignore create_if_not_exist and truncate.
+	DasFileFlags_create_new = 0x20,
 };
 
+typedef struct DasFileHandle DasFileHandle;
+struct DasFileHandle {
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
-typedef int DasFileHandle;
+	int raw; // native Unix File Descriptor
+#elif _WIN32
+	HANDLE raw; // native Windows File Handle
 #else
-typedef HANDLE DasFileHandle;
+#error "unimplemented file API for this platform"
 #endif
+};
 
 //
-// TODO implement for windows that write documentation
-// when we can find commonalities.
-// currently implemented to open up a file for das_virt_mem_map_file
+// opens a file to be use by the other file functions or das_virt_mem_map_file.
 //
-DasBool das_file_open(char* path, DasFileAccess access, DasFileFlags flags, DasFileHandle* file_handle_out);
-DasBool das_file_close(DasFileHandle handle);
-uint64_t das_file_size(DasFileHandle handle);
-uintptr_t das_file_read(DasFileHandle handle, void* data_out, uintptr_t length);
-uintptr_t das_file_write(DasFileHandle handle, void* data, uintptr_t length);
+// @param(path): a path to the file you wish to open
+//
+// @param(flags): flags to choose how you want the file to be opened.
+//     see DasFileFlags for more information.
+//
+// @param(file_handle_out): a pointer to the file handle that is set
+//     when this function returns successfully.
+//
+// @return: 0 on success, otherwise a error code to indicate the error.
+//
+DasError das_file_open(char* path, DasFileFlags flags, DasFileHandle* file_handle_out);
+
+//
+// closes a file that was opened with das_file_open.
+//
+// @param(handle): the file handle created with successful call to das_file_open
+//
+// @return: 0 on success, otherwise a error code to indicate the error.
+//
+DasError das_file_close(DasFileHandle handle);
+
+//
+// gets the size of the file in bytes
+//
+// @param(handle): the file handle created with successful call to das_file_open
+//
+// @param(size_out): a pointer to a value that is set to size of the file when this function returns successfully.
+//
+// @return: 0 on success, otherwise a error code to indicate the error.
+//
+DasError das_file_size(DasFileHandle handle, uint64_t* size_out);
+
+//
+// attempts to read bytes from a file at it's current cursor in one go.
+// the cursor is incremented by the number of bytes read.
+//
+// @param(handle): the file handle created with successful call to das_file_open
+//
+// @param(data_out): a pointer to where the data is read to.
+//
+// @param(length): the number of bytes you wish to try and read into @param(data_out) in one go.
+//
+// @param(bytes_read_out): a pointer to a value that is set to the number of bytes read when this function returns successfully.
+//     on success: if *bytes_read_out == 0 then the end of the file has been reached and no bytes where read
+//
+// @return: 0 on success, otherwise a error code to indicate the error.
+//
+DasError das_file_read(DasFileHandle handle, void* data_out, uintptr_t length, uintptr_t* bytes_read_out);
+
+//
+// attempts to read bytes from a file at it's current cursor until the supplied output buffer is filled up.
+// the cursor is incremented by the number of bytes read.
+//
+// @param(handle): the file handle created with successful call to das_file_open
+//
+// @param(data_out): a pointer to where the data is read to.
+//
+// @param(length): the number of bytes you wish to try and read into @param(data_out)
+//
+// @param(bytes_read_out): a pointer to a value that is set to the number of bytes read when this function returns successfully.
+//     on success: if *bytes_read_out == 0 then the end of the file has been reached and no bytes where read
+//
+// @return: 0 on success, otherwise a error code to indicate the error.
+//
+DasError das_file_read_exact(DasFileHandle handle, void* data_out, uintptr_t length, uintptr_t* bytes_read_out);
+
+//
+// attempts to write bytes to a file at it's current cursor in one go.
+// the cursor is incremented by the number of bytes written.
+//
+// @param(handle): the file handle created with successful call to das_file_open
+//
+// @param(data): a pointer to where the data is written to.
+//
+// @param(length): the number of bytes you wish to try and write into @param(data) in one go.
+//
+// @param(bytes_written_out): a pointer to a value that is set to the number of bytes written when this function returns successfully.
+//     on success: if *bytes_written_out == 0 then the end of the file has been reached and no bytes where written
+//
+// @return: 0 on success, otherwise a error code to indicate the error.
+//
+DasError das_file_write(DasFileHandle handle, void* data, uintptr_t length, uintptr_t* bytes_written_out);
+
+//
+// attempts to write bytes from a file at it's current cursor until the supplied output buffer is filled up.
+// the cursor is incremented by the number of bytes written.
+//
+// @param(handle): the file handle created with successful call to das_file_open
+//
+// @param(data): a pointer to where the data is written to.
+//
+// @param(length): the number of bytes you wish to try and write into @param(data)
+//
+// @param(bytes_written_out): a pointer to a value that is set to the number of bytes written when this function returns successfully.
+//     on success: if *bytes_written_out == 0 then the end of the file has been reached and no bytes where written
+//
+// @return: 0 on success, otherwise a error code to indicate the error.
+//
+DasError das_file_write_exact(DasFileHandle handle, void* data, uintptr_t length, uintptr_t* bytes_written_out);
+
+typedef uint8_t DasFileSeekFrom;
+enum {
+	// the file cursor offset will be set to @param(offset) in bytes
+	DasFileSeekFrom_start,
+	// the file cursor offset will be set to the file's current cursor offset + @param(offset) in bytes
+	DasFileSeekFrom_current,
+	// the file cursor offset will be set to the file's size + @param(offset) in bytes
+	DasFileSeekFrom_end
+};
+
+//
+// attempts to move the file's cursor to a different location in the file to read and write from.
+//
+// @param(handle): the file handle created with successful call to das_file_open
+//
+// @param(offset): offset from where the @param(from) is targeting. see DasFileSeekFrom for more information
+//
+// @param(from): a target to seek from in the file. see DasFileSeekFrom for more information
+//
+// @param(cursor_offset_out): a pointer to a value that is set to the file's cursor offset when this function returns successfully.
+//
+// @return: 0 on success, otherwise a error code to indicate the error.
+//
+DasError das_file_seek(DasFileHandle handle, int64_t offset, DasFileSeekFrom from, uint64_t* cursor_offset_out);
+
+//
+// flush any queued data in the OS for the file to the storage device.
+//
+// @param(handle): the file handle created with successful call to das_file_open
+//
+// @return: 0 on success, otherwise a error code to indicate the error.
+//
+DasError das_file_flush(DasFileHandle handle);
 
 // ===========================================================================
 //
@@ -687,33 +866,6 @@ enum {
 };
 
 //
-// 0 means success
-typedef uint32_t DasVirtMemError;
-
-//
-// @return: the previous error of a virtual memory function call.
-//          only call this directly after one of the virtual memory functions.
-//          on Unix: this returns errno
-//          on Windows: this returns GetLastError()
-//
-DasVirtMemError das_virt_mem_get_last_error();
-
-typedef uint8_t DasVirtMemErrorStrRes;
-enum {
-	DasVirtMemErrorStrRes_success,
-	DasVirtMemErrorStrRes_invalid_error_arg,
-	DasVirtMemErrorStrRes_not_enough_space_in_buffer,
-};
-
-//
-// get the string of @param(error) and writes it into the @param(buf_out) pointer upto @param(buf_out_len)
-// @param(buf_out) is null terminated on success.
-//
-// @return: the result detailing the success or error.
-//
-DasVirtMemErrorStrRes das_virt_mem_get_error_string(DasVirtMemError error, char* buf_out, uint32_t buf_out_len);
-
-//
 // @param(page_size_out):
 //     the page size of the OS.
 //     used to align the parameters of the virtual memory functions to a page.
@@ -725,10 +877,9 @@ DasVirtMemErrorStrRes das_virt_mem_get_error_string(DasVirtMemError error, char*
 //     On Unix: this is just the page_size
 //     On Windows: this is what known as the page granularity.
 //
-// @return: das_false on failure, otherwise das_true is returned.
-//          if errored you can get the error by calling das_virt_mem_get_last_error() directly after this call.
+// @return: 0 on success, otherwise a error code to indicate the error.
 //
-DasBool das_virt_mem_page_size(uintptr_t* page_size_out, uintptr_t* reserve_align_out);
+DasError das_virt_mem_page_size(uintptr_t* page_size_out, uintptr_t* reserve_align_out);
 
 //
 // reserve a range of the virtual address space but does not commit any physical pages of memory.
@@ -738,39 +889,39 @@ DasBool das_virt_mem_page_size(uintptr_t* page_size_out, uintptr_t* reserve_alig
 //          you can only release the full reserved address space that is issued by this function call.
 //          there are also restriction on protection, see das_virt_mem_protection_set.
 //
-// @param requested_addr: the requested start address you wish to reserve.
-//             must be a aligned to the reserve_align that is retrieved from das_virt_mem_page_size function.
-//             this is not guaranteed and is only used as hint.
-//             NULL will not be used as a hint, instead the OS will choose an address for you.
+// @param(requested_addr): the requested start address you wish to reserve.
+//     be a aligned to the reserve_align that is retrieved from das_virt_mem_page_size function.
+//     this is not guaranteed and is only used as hint.
+//     NULL will not be used as a hint, instead the OS will choose an address for you.
 //
-// @param size: the size in bytes you wish to reserve from the @param(requested_addr)
-//             must be a multiple of the reserve_align that is retrieved from das_virt_mem_page_size function.
+// @param(size): the size in bytes you wish to reserve from the @param(requested_addr)
+//     must be a multiple of the reserve_align that is retrieved from das_virt_mem_page_size function.
 //
-// @return: NULL on error, otherwise the start of the reserved block of memory.
-//          if errored you can get the error by calling das_virt_mem_get_last_error()
-//          directly after this call
+// @param(addr_out) a pointer to a value that is set to the start of the reserved block of memory
+//     when this function returns successfully.
 //
-void* das_virt_mem_reserve(void* requested_addr, uintptr_t size);
+// @return: 0 on success, otherwise a error code to indicate the error.
+//
+DasError das_virt_mem_reserve(void* requested_addr, uintptr_t size, void** addr_out);
 
 //
 // requests the OS to commit physical pages of memory to the the address space.
 // this address space must be a full or subsection of the reserved address space with das_virt_mem_reserve.
 // the memory in the commited address space will be zeroed after calling this function.
 //
-// @param addr: the start address of the memory you wish to commit.
-//              must be a aligned to the page size das_virt_mem_page_size returns.
-//              this is not guaranteed and is only used as hint.
-//              NULL will not be used as a hint.
+// @param(addr): the start address of the memory you wish to commit.
+//     must be a aligned to the page size das_virt_mem_page_size returns.
+//     this is not guaranteed and is only used as hint.
+//     NULL will not be used as a hint.
 //
-// @param size: the size in bytes you wish to reserve from the @param(addr)
-//             must be a aligned to the page size das_virt_mem_page_size returns.
+// @param(size): the size in bytes you wish to reserve from the @param(addr)
+//     must be a aligned to the page size das_virt_mem_page_size returns.
 //
-// @param protection: what the memory is allowed to be used for
+// @param(protection): what the memory is allowed to be used for
 //
-// @return: das_false on failure, otherwise das_true is returned.
-//          if errored you can get the error by calling das_virt_mem_get_last_error() directly after this call.
+// @return: 0 on success, otherwise a error code to indicate the error.
 //
-DasBool das_virt_mem_commit(void* addr, uintptr_t size, DasVirtMemProtection protection);
+DasError das_virt_mem_commit(void* addr, uintptr_t size, DasVirtMemProtection protection);
 
 //
 // change the protection of a range of memory.
@@ -779,32 +930,30 @@ DasBool das_virt_mem_commit(void* addr, uintptr_t size, DasVirtMemProtection pro
 // WARNING: on Windows, you can change protection of any number pages
 //          but that they all must come from the same call they where reserved with.
 //
-// @param addr: the start of the pages you wish to change the protection for.
+// @param(addr): the start of the pages you wish to change the protection for.
 //             must be a aligned to the page size das_virt_mem_page_size returns.
 //
-// @param size: the size in bytes of the memory you wish to change protection for.
+// @param(size): the size in bytes of the memory you wish to change protection for.
 //             must be a aligned to the page size das_virt_mem_page_size returns.
 //
-// @param protection: what the memory is allowed to be used for
+// @param(protection): what the memory is allowed to be used for
 //
-// @return: das_false on failure, otherwise das_true is returned.
-//          if errored you can get the error by calling das_virt_mem_get_last_error() directly after this call.
+// @return: 0 on success, otherwise a error code to indicate the error.
 //
-DasBool das_virt_mem_protection_set(void* addr, uintptr_t size, DasVirtMemProtection protection);
+DasError das_virt_mem_protection_set(void* addr, uintptr_t size, DasVirtMemProtection protection);
 
 //
 // gives the memory back to the OS but will keep the address space reserved
 //
-// @param addr: the start of the pages you wish to decommit.
+// @param(addr): the start of the pages you wish to decommit.
 //             must be a aligned to the page size das_virt_mem_page_size returns.
 //
-// @param size: the size in bytes of the memory you wish to release.
+// @param(size): the size in bytes of the memory you wish to release.
 //             must be a aligned to the page size das_virt_mem_page_size returns.
 //
-// @return: das_false on failure, otherwise das_true is returned.
-//          if errored you can get the error by calling das_virt_mem_get_last_error() directly after this call.
+// @return: 0 on success, otherwise a error code to indicate the error.
 //
-DasBool das_virt_mem_decommit(void* addr, uintptr_t size);
+DasError das_virt_mem_decommit(void* addr, uintptr_t size);
 
 //
 // gives the pages reserved back to the OS. the address range must have be reserved with das_virt_mem_reserve.
@@ -814,16 +963,15 @@ DasBool das_virt_mem_decommit(void* addr, uintptr_t size);
 //          you can only release the full reserved address space that is issued by das_virt_mem_reserve.
 //          so @param(size) is ignored on Windows.
 //
-// @param addr: the start of the pages you wish to release.
+// @param(addr): the start of the pages you wish to release.
 //             must be a aligned to the page size das_virt_mem_page_size returns.
 //
-// @param size: the size in bytes of the memory you wish to release.
+// @param(size): the size in bytes of the memory you wish to release.
 //             must be a aligned to the page size das_virt_mem_page_size returns.
 //
-// @return: das_false on failure, otherwise das_true is returned.
-//          if errored you can get the error by calling das_virt_mem_get_last_error() directly after this call.
+// @return: 0 on success, otherwise a error code to indicate the error.
 //
-DasBool das_virt_mem_release(void* addr, uintptr_t size);
+DasError das_virt_mem_release(void* addr, uintptr_t size);
 
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
 typedef void* DasMapFileHandle; // unused
@@ -834,42 +982,43 @@ typedef HANDLE DasMapFileHandle;
 //
 // maps a file to the virtual address space of the process.
 //
-// @param requested_addr: see the same parameter in das_virt_mem_reserve for more info.
+// @param(requested_addr): see the same parameter in das_virt_mem_reserve for more info.
 //
-// @param file_handle: the handle to the file opened with das_file_open
+// @param(file_handle): the handle to the file opened with das_file_open
 //
-// @param protection: what the memory is allowed to be used for.
+// @param(protection): what the memory is allowed to be used for.
 //     this must match with the file_handle's access rights
-//     see das_file_open and DasFileAccess.
+//     see das_file_open and DasFileFlags.
 //
-// @param offset: offset into the file in bytes this does not have to be aligned in anyway.
+// @param(offset): offset into the file in bytes this does not have to be aligned in anyway.
 //     internally it will round this down to the nearest reserve_align and map that.
 //
-// @param size: size of the file in bytes starting from the offset that you wish to map into the address space.
+// @param(size): size of the file in bytes starting from the offset that you wish to map into the address space.
 //     this does not have to be aligned in anyway but it will round this up to the page size internally and map that.
 //
-// @param map_file_handle_out: a pointer that is set apon success to the handle of the map file.
+// @param(addr_out) a pointer to a value that is set to the address pointing to the offset into the file that was requested
+//     when this function returns successfully.
+//
+// @param(map_file_handle_out): a pointer that is set apon success to the handle of the map file.
 //     this is only used in Windows and must be passed into das_virt_mem_unmap_file to unmap correctly.
 //
-// @return: NULL on failure, otherwise the address pointing to the offset into the file that was requested.
-//          if errored you can get the error by calling das_virt_mem_get_last_error() directly after this call.
+// @return: 0 on success, otherwise a error code to indicate the error.
 //
-void* das_virt_mem_map_file(void* requested_addr, DasFileHandle file_handle, DasVirtMemProtection protection, uint64_t offset, uintptr_t size, DasMapFileHandle* map_file_handle_out);
+DasError das_virt_mem_map_file(void* requested_addr, DasFileHandle file_handle, DasVirtMemProtection protection, uint64_t offset, uintptr_t size, void** addr_out, DasMapFileHandle* map_file_handle_out);
 
 
 //
 // unmaps a file that was mapped into the virtual address space by das_virt_mem_map_file.
 //
-// @param addr: the address that was returned when mapping the file.
+// @param(addr): the address that was returned when mapping the file.
 //
-// @param size: the size that was used when mapping the file.
+// @param(size): the size that was used when mapping the file.
 //
-// @param map_file_handle: the map file handle that was returned when mapping the file.
+// @param(map_file_handle): the map file handle that was returned when mapping the file.
 //
-// @return: das_false on failure, otherwise das_true is returned.
-//          if errored you can get the error by calling das_virt_mem_get_last_error() directly after this call.
+// @return: 0 on success, otherwise a error code to indicate the error.
 //
-DasBool das_virt_mem_unmap_file(void* addr, uintptr_t size, DasMapFileHandle map_file_handle);
+DasError das_virt_mem_unmap_file(void* addr, uintptr_t size, DasMapFileHandle map_file_handle);
 
 #endif
 
