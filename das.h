@@ -956,8 +956,11 @@ DasError das_virt_mem_protection_set(void* addr, uintptr_t size, DasVirtMemProte
 DasError das_virt_mem_decommit(void* addr, uintptr_t size);
 
 //
-// gives the pages reserved back to the OS. the address range must have be reserved with das_virt_mem_reserve.
-// you can target sub pages of the original allocation but just make sure the parameters are aligned.
+// gives the reserved pages back to the OS. the address range must have be reserved with das_virt_mem_reserve.
+// all commit pages in the released address space are automatically decommit when you release.
+//
+// on non Windows systems only:
+//     you can target sub pages of the original allocation but just make sure the parameters are aligned.
 //
 // WARNING: on Windows, you cannot release sub sections of the address space.
 //          you can only release the full reserved address space that is issued by das_virt_mem_reserve.
@@ -1019,6 +1022,71 @@ DasError das_virt_mem_map_file(void* requested_addr, DasFileHandle file_handle, 
 // @return: 0 on success, otherwise a error code to indicate the error.
 //
 DasError das_virt_mem_unmap_file(void* addr, uintptr_t size, DasMapFileHandle map_file_handle);
+
+// ===========================================================================
+//
+//
+// Linear Allocator
+//
+//
+// ===========================================================================
+//
+// this linear allocator directly reserve address space and commits chunks
+// of memory as and when they are needed. so you can reserve 2GBs and no
+// memory is taken up on the system.
+// all allocated memory is zeroed by the OS when the commit new chunks.
+//
+
+typedef struct {
+	void* address_space;
+	uintptr_t pos;
+	uintptr_t commited_size;
+	uintptr_t commit_grow_size;
+	uintptr_t reserved_size;
+} DasLinearAlctor;
+
+//
+// initializes the linear allocator and reserves the address space
+// needed to store @param(reserved_size) in bytes.
+//
+// @param(alctor): a pointer the linear allocator structure to initialize.
+//
+// @param(reserved_size): the maximum size the linear allocator can expand to in bytes.
+//
+// @param(commit_grow_size): the amount of memory that is commit when the linear allocator needs to grow
+//
+// @return: 0 on success, otherwise a error code to indicate the error.
+//
+DasError DasLinearAlctor_init(DasLinearAlctor* alctor, uintptr_t reserved_size, uintptr_t commit_grow_size);
+
+//
+// deinitializes the linear allocator and release the address space back to the OS
+//
+// @param(alctor): a pointer the linear allocator structure to initialize.
+// @return: 0 on success, otherwise a error code to indicate the error.
+//
+DasError DasLinearAlctor_deinit(DasLinearAlctor* alctor);
+
+//
+// this is the allocator alloc function used in the DasAlctor interface.
+//
+// reset: set the next allocation position back to 0 and decommit all existing memory back to the OS
+//
+// alloc: try to bump up the next allocation position if there is enough commited memory and return the pointer to the zeroed memory.
+//     if go past the commited memory then try to commit more if it has not reache the maximum reserved size already.
+//     if we have exhausted the reserve size, then the allocation fails.
+//
+// realloc: if this was the previous allocation then try to extend the allocation in place.
+//     if not then allocate new memory and copy the old allocation there.
+//
+// dealloc: do nothing
+//
+void* DasLinearAlctor_alloc_fn(void* alctor_data, void* ptr, uintptr_t old_size, uintptr_t size, uintptr_t align);
+
+//
+// creates an instance of the DasAlctor interface using a DasLinearAlctor.
+#define DasLinearAlctor_as_das(linear_alctor_ptr) \
+	(DasAlctor){ .fn = DasLinearAlctor_alloc_fn, .data = linear_alctor_ptr };
 
 #endif
 

@@ -1119,3 +1119,126 @@ DasError das_virt_mem_unmap_file(void* addr, uintptr_t size, DasMapFileHandle ma
 #endif
 }
 
+// ===========================================================================
+//
+//
+// Linear Allocator
+//
+//
+// ===========================================================================
+
+DasError DasLinearAlctor_init(DasLinearAlctor* alctor, uintptr_t reserved_size, uintptr_t commit_grow_size) {
+	uintptr_t reserve_align;
+	uintptr_t page_size;
+	DasError error = das_virt_mem_page_size(&page_size, &reserve_align);
+	if (error) return error;
+
+	// reserved_size must be a multiple of the reserve_align.
+	// commit_grow_size must be multiple of the page size.
+	commit_grow_size = das_round_up_nearest_multiple_u(commit_grow_size, page_size);
+	reserved_size = das_round_up_nearest_multiple_u(reserved_size, reserve_align);
+	reserved_size = das_round_up_nearest_multiple_u(reserved_size, commit_grow_size);
+	void* address_space;
+	error = das_virt_mem_reserve(NULL, reserved_size, &address_space);
+	if (error) return error;
+
+	alctor->address_space = address_space;
+	alctor->pos = 0;
+	alctor->commited_size = 0;
+	alctor->commit_grow_size = commit_grow_size;
+	alctor->reserved_size = reserved_size;
+	return DasError_success;
+}
+
+DasError DasLinearAlctor_deinit(DasLinearAlctor* alctor) {
+	return das_virt_mem_release(alctor->address_space, alctor->reserved_size);
+}
+
+static DasBool _DasLinearAlctor_commit_next_chunk(DasLinearAlctor* alctor) {
+	if (alctor->commited_size == alctor->reserved_size) {
+		// linear alloctor reserved_size has been exhausted.
+		// there is no more memory to commit.
+		return das_false;
+	} else {
+		//
+		// commit the next pages of memory using the grow size the linear allocator was initialized with.
+		void* next_pages_start = das_ptr_add(alctor->address_space, alctor->commited_size);
+
+		//
+		// make sure the commit grow size does not go past the reserved address_space.
+		uintptr_t grow_size = das_min_u(alctor->commit_grow_size, alctor->reserved_size - alctor->commited_size);
+
+		DasError error = das_virt_mem_commit(next_pages_start, grow_size, DasVirtMemProtection_read_write);
+		das_assert(error == 0, "failed to commit memory next_pages_start(%p), grow_size(%zu), error_code(0x%x)",
+			next_pages_start, grow_size, error);
+		alctor->commited_size += grow_size;
+		return das_true;
+	}
+}
+
+void* DasLinearAlctor_alloc_fn(void* alctor_data, void* ptr, uintptr_t old_size, uintptr_t size, uintptr_t align) {
+	DasLinearAlctor* alctor = (DasLinearAlctor*)alctor_data;
+	if (!ptr && size == 0) {
+		// reset by decommiting the memory back to the OS but retaining the reserved address space.
+		DasError error = das_virt_mem_decommit(alctor->address_space, alctor->commited_size);
+		das_assert(error == 0, "failed to decommit memory address_space(%p), commited_size(%zu)",
+			alctor->address_space, alctor->commited_size);
+
+		alctor->pos = 0;
+		alctor->commited_size = 0;
+	} else if (!ptr) {
+		// allocate
+		while (1) {
+			//
+			// get the next pointer and align it
+			ptr = das_ptr_add(alctor->address_space, alctor->pos);
+			ptr = das_ptr_round_up_align(ptr, align);
+			uint32_t next_pos = das_ptr_diff(ptr, alctor->address_space) + size;
+			if (next_pos <= alctor->commited_size) {
+				//
+				// success, the requested size can fit in the linear block of memory.
+				alctor->pos = next_pos;
+				return ptr;
+			} else {
+				//
+				// failure, not enough room in the linear block of memory that is commited.
+				// so lets try to commit more memory.
+				if (!_DasLinearAlctor_commit_next_chunk(alctor))
+					return NULL;
+			}
+		}
+	} else if (ptr && size > 0) {
+		// reallocate
+
+		// check if the ptr is the last allocation to resize in place
+		if (das_ptr_add(alctor->address_space, alctor->pos - old_size) == ptr) {
+			while (1) {
+				uint32_t next_pos = das_ptr_diff(ptr, alctor->address_space) + size;
+				if (next_pos <= alctor->commited_size) {
+					alctor->pos = next_pos;
+					return ptr;
+				} else {
+					//
+					// failure, not enough room in the linear block of memory that is commited.
+					// so lets try to commit more memory.
+					if (!_DasLinearAlctor_commit_next_chunk(alctor))
+						return NULL;
+				}
+			}
+		}
+
+		// if we cannot extend in place, then just allocate a new block.
+		void* new_ptr = DasLinearAlctor_alloc_fn(alctor, NULL, 0, size, align);
+		if (new_ptr == NULL) { return NULL; }
+
+		memcpy(new_ptr, ptr, size < old_size ? size : old_size);
+		return new_ptr;
+	} else {
+		// deallocate
+		// do nothing
+		return NULL;
+	}
+
+	return NULL;
+}
+
