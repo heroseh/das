@@ -308,8 +308,8 @@ void* das_system_alloc_fn(void* alloc_data, void* ptr, uintptr_t old_size, uintp
 // DasStk(int) stack_of_ints;
 // DasStk_resize_cap(&stack_of_ints, 64);
 //
-// int* ptr = DasStk_push(&stack_of_ints);
-// *ptr = value;
+// int* elmt = DasStk_push(&stack_of_ints);
+// *elmt = 55;
 //
 // DasStk_pop(&stack_of_ints);
 //
@@ -360,28 +360,37 @@ typedef_DasStk(int32_t);
 typedef_DasStk(int64_t);
 
 #define DasStk_data(stk_ptr) ((*stk_ptr) ? (*(stk_ptr))->DasStk_data : NULL)
-#define DasStk_count(stk_ptr) ((*stk_ptr) ? (*(stk_ptr))->count: 0)
-#define DasStk_cap(stk_ptr) ((*stk_ptr) ? (*(stk_ptr))->cap: 0)
+#define DasStk_count(stk_ptr) ((*stk_ptr) ? (*(stk_ptr))->count : 0)
+#define DasStk_set_count(stk_ptr, new_count) ((*stk_ptr) ? (*(stk_ptr))->count = (new_count) : 0)
+#define DasStk_cap(stk_ptr) ((*stk_ptr) ? (*(stk_ptr))->cap : 0)
 #define DasStk_elmt_size(stk_ptr) (sizeof(*(*(stk_ptr))->DasStk_data))
 #define DasStk_alctor(stk_ptr) ((*stk_ptr) ? (*(stk_ptr))->alctor : DasAlctor_default)
 
+#define DasStk_for_each(stk_ptr, INDEX_NAME) \
+	for (uintptr_t INDEX_NAME = 0, _end_ = DasStk_count(stk_ptr); INDEX_NAME < _end_; INDEX_NAME += 1)
+
 //
 // there is no DasStk_init, zeroed data is initialization.
-// if you would like to initialize with a capacity just call
-// DasStk_resize_cap on a zeroed stack.
-// if you would like to initialize with a custom allocator.
-// see DasStk_init_with_alctor.
 //
 
 //
 // preallocates a stack with enough capacity to store init_cap number of elements.
+#define DasStk_init_with_cap(stk_ptr, init_cap) DasStk_init_with_alctor(stk_ptr, init_cap, DasAlctor_default)
 // the memory is allocator with the supplied allocator and is used for all future reallocations.
 #define DasStk_init_with_alctor(stk_ptr, init_cap, alctor) \
 	_DasStk_init_with_alctor((_DasStkHeader**)stk_ptr, sizeof(**(stk_ptr)), init_cap, alctor, DasStk_elmt_size(stk_ptr))
 extern DasBool _DasStk_init_with_alctor(_DasStkHeader** header_out, uintptr_t header_size, uintptr_t init_cap, DasAlctor alctor, uintptr_t elmt_size);
 
+//
+// initialize a stack by copying all the elements from another stack.
+#define DasStk_init_clone(dst_stk_ptr, src_stk_ptr) DasStk_init_clone_with_alctor(dst_stk_ptr, src_stk_ptr, DasAlctor_default)
+// the memory is allocator with the supplied allocator and is used for all future reallocations.
+#define DasStk_init_clone_with_alctor(dst_stk_ptr, src_stk_ptr, alctor) \
+	_DasStk_init_clone_with_alctor((_DasStkHeader**)dst_stk_ptr, sizeof(**(dst_stk_ptr)), (_DasStkHeader*)*(src_stk_ptr), alctor, DasStk_elmt_size(dst_stk_ptr))
+DasBool _DasStk_init_clone_with_alctor(_DasStkHeader** dst_header_in_out, uintptr_t header_size, _DasStkHeader* src_header, DasAlctor alctor, uintptr_t elmt_size);
+
 // deallocates the memory and sets the stack to being empty.
-#define DasStk_deinit(stk_Ptr) _DasStk_deinit((_DasStkHeader**)stk_ptr, sizeof(**(stk_ptr)), DasStk_elmt_size(stk_ptr))
+#define DasStk_deinit(stk_ptr) _DasStk_deinit((_DasStkHeader**)stk_ptr, sizeof(**(stk_ptr)), DasStk_elmt_size(stk_ptr))
 extern void _DasStk_deinit(_DasStkHeader** header_in_out, uintptr_t header_size, uintptr_t elmt_size);
 
 // removes all the elements from the deque
@@ -420,21 +429,23 @@ extern DasBool _DasStk_resize(_DasStkHeader** header_in_out, uintptr_t header_si
 	_DasStk_resize_cap((_DasStkHeader**)stk_ptr, sizeof(**(stk_ptr)), new_cap, DasStk_elmt_size(stk_ptr))
 extern DasBool _DasStk_resize_cap(_DasStkHeader** header_in_out, uintptr_t header_size, uintptr_t new_cap, uintptr_t elmt_size);
 
-// insert uninitialized element/s at the index position in the stack.
+// inserts element/s onto the index position in the stack that will be initialized with
+// the data stored at @param(elmts). if @param(elmts) is NULL, then the elements are uninitialized.
 // the elements from the index position in the stack, will be shifted to the right.
 // to make room for the inserted element/s.
-// returns das_false on allocation failure, otherwise das_true
-#define DasStk_insert(stk_ptr, idx) DasStk_insert_many(stk_ptr, idx, 1)
-#define DasStk_insert_many(stk_ptr, idx, elmts_count) \
-	_DasStk_insert_many((_DasStkHeader**)stk_ptr, sizeof(**(stk_ptr)), idx, elmts_count, DasStk_elmt_size(stk_ptr))
-extern DasBool _DasStk_insert_many(_DasStkHeader** header_in_out, uintptr_t header_size, uintptr_t idx, uintptr_t elmts_count, uintptr_t elmt_size);
+// returns a pointer to the first new element, but NULL will be returned on allocation failure.
+#define DasStk_insert(stk_ptr, idx, elmt) DasStk_insert_many(stk_ptr, idx, elmt, 1)
+#define DasStk_insert_many(stk_ptr, idx, elmts, elmts_count) \
+	_DasStk_insert_many((_DasStkHeader**)stk_ptr, sizeof(**(stk_ptr)), idx, elmts, elmts_count, DasStk_elmt_size(stk_ptr))
+extern void* _DasStk_insert_many(_DasStkHeader** header_in_out, uintptr_t header_size, uintptr_t idx, void* elmts, uintptr_t elmts_count, uintptr_t elmt_size);
 
-// pushes uninitialized element/s onto the end of the stack
-// returns the index of the first new element, but a UINTPTR_MAX will be returned on allocation failure.
-#define DasStk_push(stk_ptr) DasStk_push_many(stk_ptr, 1)
-#define DasStk_push_many(stk_ptr, elmts_count) \
-	_DasStk_push_many((_DasStkHeader**)stk_ptr, sizeof(**(stk_ptr)), elmts_count, DasStk_elmt_size(stk_ptr))
-extern uintptr_t _DasStk_push_many(_DasStkHeader** header_in_out, uintptr_t header_size, uintptr_t elmts_count, uintptr_t elmt_size);
+// pushes element/s onto the end of the stack that will be initialized with
+// the data stored at @param(elmts). if @param(elmts) is NULL, then the elements are uninitialized.
+// returns a pointer to the first new element, but NULL will be returned on allocation failure.
+#define DasStk_push(stk_ptr, elmt) DasStk_push_many(stk_ptr, elmt, 1)
+#define DasStk_push_many(stk_ptr, elmts, elmts_count) \
+	_DasStk_push_many((_DasStkHeader**)stk_ptr, sizeof(**(stk_ptr)), elmts, elmts_count, DasStk_elmt_size(stk_ptr))
+extern void* _DasStk_push_many(_DasStkHeader** header_in_out, uintptr_t header_size, void* elmts, uintptr_t elmts_count, uintptr_t elmt_size);
 
 // removes element/s from the end of the stack
 // returns the number of elements popped from the stack.
@@ -460,13 +471,17 @@ extern void _DasStk_remove_swap_range(_DasStkHeader* header, uintptr_t header_si
 extern void _DasStk_remove_shift_range(_DasStkHeader* header, uintptr_t header_size, uintptr_t start_idx, uintptr_t end_idx, uintptr_t elmt_size);
 
 // pushes the string on to the end of a byte stack.
-// returns the index of the start where the string is placed in the stack, but a UINTPTR_MAX will be returned on allocation failure.
-extern uintptr_t DasStk_push_str(DasStk(char)* stk, char* str);
+// returns the pointer to the start where the string is placed in the stack, but NULL will be returned on allocation failure.
+extern char* DasStk_push_str(DasStk(char)* stk, char* str);
 
 // pushes the formatted string on to the end of a byte stack.
-// returns the index of the start where the string is placed in the stack, but a UINTPTR_MAX will be returned on allocation failure.
-extern uintptr_t DasStk_push_str_fmtv(DasStk(char)* stk, char* fmt, va_list args);
-extern uintptr_t DasStk_push_str_fmt(DasStk(char)* stk, char* fmt, ...);
+// returns the pointer to the start where the string is placed in the stack, but NULL will be returned on allocation failure.
+extern void* DasStk_push_str_fmtv(DasStk(char)* stk, char* fmt, va_list args);
+#ifdef __GNUC__
+extern void* DasStk_push_str_fmt(DasStk(char)* stk, char* fmt, ...) __attribute__ ((format (printf, 2, 3)));
+#else
+extern void* DasStk_push_str_fmt(DasStk(char)* stk, char* fmt, ...);
+#endif
 
 // ======================================================================
 //
@@ -490,10 +505,11 @@ extern uintptr_t DasStk_push_str_fmt(DasStk(char)* stk, char* fmt, ...);
 // DasDeque(int) queue_of_ints;
 // DasDeque_init_with_cap(&queue_of_ints, 64);
 //
-// int value = 22;
-// DasDeque_push_back(&queue_of_ints, &value);
+// DasDeque_push_back(&queue_of_ints, NULL);
+// *DasDeque_get_last(&queue_of_ints) = 22;
 //
-// DasDeque_pop_front(&queue_of_ints, &value);
+// int popped_value = *DasDeque_get(&queue_of_ints, 0);
+// DasDeque_pop_front(&queue_of_ints);
 
 #define DasDeque(T) DasDequeHeader_##T*
 
@@ -561,9 +577,14 @@ typedef_DasDeque(int64_t);
 #define DasDeque_alctor(deque_ptr) ((*deque_ptr) ? (*(deque_ptr))->alctor : DasAlctor_default)
 
 //
+// there is no DasDeque_init, zeroed data is initialization.
+//
+
+// preallocates a deque with enough capacity to store init_cap number of elements.
+#define DasDeque_init_with_cap(deque_ptr, init_cap) DasDeque_init_with_alctor(deque_ptr, init_cap, DasAlctor_default)
 // the memory is allocator with the supplied allocator and is used for all future reallocations.
 #define DasDeque_init_with_alctor(deque_ptr, init_cap, alctor) \
-	_DasStk_init_with_alctor((_DasStkHeader**)deque_ptr, sizeof(**(deque_ptr)), init_cap, alctor, DasStk_elmt_size(deque_ptr))
+	_DasDeque_init_with_alctor((_DasDequeHeader**)deque_ptr, sizeof(**(deque_ptr)), init_cap, alctor, DasDeque_elmt_size(deque_ptr))
 extern DasBool _DasDeque_init_with_alctor(_DasDequeHeader** header_out, uintptr_t header_size, uintptr_t init_cap, DasAlctor alctor, uintptr_t elmt_size);
 
 // deallocates the memory and sets the deque to being empty.
@@ -606,19 +627,21 @@ void _DasDeque_read(_DasDequeHeader* header, uintptr_t header_size, uintptr_t id
 #define DasDeque_write(deque_ptr, idx, elmts, elmts_count) _DasDeque_write((_DasDequeHeader*)*(deque_ptr), sizeof(**(deque_ptr)), idx, elmts, elmts_count, DasDeque_elmt_size(deque_ptr))
 void _DasDeque_write(_DasDequeHeader* header, uintptr_t header_size, uintptr_t idx, void* elmts, uintptr_t elmts_count, uintptr_t elmt_size);
 
-// pushes uninitialized element/s at the FRONT of the deque.
-// they can be initialized with DasDeque_write or writing to a pointer returned by DasDeque_get
-// returns das_false on allocation failure, otherwise das_true
-#define DasDeque_push_front(deque_ptr) DasDeque_push_front_many(deque_ptr, 1)
-#define DasDeque_push_front_many(deque_ptr, elmts_count) _DasDeque_push_front_many((_DasDequeHeader**)deque_ptr, sizeof(**(deque_ptr)), elmts_count, DasDeque_elmt_size(deque_ptr))
-DasBool _DasDeque_push_front_many(_DasDequeHeader** header_in_out, uintptr_t header_size, uintptr_t elmts_count, uintptr_t elmt_size);
+// pushes element/s at the FRONT of the deque with the data stored at @param(elmts).
+// if @param(elmts) is NULL, then the elements are uninitialized.
+// returns an index to the first new element in the deque (which is always 0),
+// but UINTPTR_MAX will be returned on allocation failure
+#define DasDeque_push_front(deque_ptr, elmt) DasDeque_push_front_many(deque_ptr, elmt, 1)
+#define DasDeque_push_front_many(deque_ptr, elmts, elmts_count) _DasDeque_push_front_many((_DasDequeHeader**)deque_ptr, sizeof(**(deque_ptr)), elmts, elmts_count, DasDeque_elmt_size(deque_ptr))
+uintptr_t _DasDeque_push_front_many(_DasDequeHeader** header_in_out, uintptr_t header_size, void* elmts, uintptr_t elmts_count, uintptr_t elmt_size);
 
-// pushes uninitialized element/s at the BACK of the deque.
-// they can be initialized with DasDeque_write or writing to a pointer returned by DasDeque_get
-// returns das_false on allocation failure, otherwise das_true
-#define DasDeque_push_back(deque_ptr) DasDeque_push_back_many(deque_ptr, 1)
-#define DasDeque_push_back_many(deque_ptr, elmts_count) _DasDeque_push_back_many((_DasDequeHeader**)deque_ptr, sizeof(**(deque_ptr)), elmts_count, DasDeque_elmt_size(deque_ptr))
-DasBool _DasDeque_push_back_many(_DasDequeHeader** header_in_out, uintptr_t header_size, uintptr_t elmts_count, uintptr_t elmt_size);
+// pushes element/s at the BACK of the deque with the data stored at @param(elmts).
+// if @param(elmts) is NULL, then the elements are uninitialized.
+// returns an index to the first new element in the deque,
+// but UINTPTR_MAX will be returned on allocation failure
+#define DasDeque_push_back(deque_ptr, elmt) DasDeque_push_back_many(deque_ptr, elmt, 1)
+#define DasDeque_push_back_many(deque_ptr, elmts, elmts_count) _DasDeque_push_back_many((_DasDequeHeader**)deque_ptr, sizeof(**(deque_ptr)), elmts, elmts_count, DasDeque_elmt_size(deque_ptr))
+uintptr_t _DasDeque_push_back_many(_DasDequeHeader** header_in_out, uintptr_t header_size, void* elmts, uintptr_t elmts_count, uintptr_t elmt_size);
 
 // removes element/s from the FRONT of the deque
 // returns the number of elements popped from the deque.

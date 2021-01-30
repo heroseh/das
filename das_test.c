@@ -5,13 +5,11 @@ void stk_test() {
 	DasStk(int) stk = NULL;
 
 	int elmt = 0;
-	uintptr_t idx = DasStk_push(&stk);
-	*DasStk_get(&stk, idx) = elmt;
+	DasStk_push(&stk, &elmt);
 	das_assert(memcmp(DasStk_data(&stk), &elmt, sizeof(int)) == 0, "test failed: DasStk_push");
 
 	for (int i = 1; i < 10; i += 1) {
-		idx = DasStk_push(&stk);
-		*DasStk_get(&stk, idx) = i;
+		DasStk_push(&stk, &i);
 	}
 
 	int b[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
@@ -68,22 +66,19 @@ void stk_test() {
 	das_assert(memcmp(DasStk_data(&stk), i, DasStk_count(&stk) * sizeof(int)) == 0, "test failed: DasStk_remove_swap end");
 
 	elmt = 77;
-	DasStk_insert(&stk, 2);
-	*DasStk_get(&stk, 2) = elmt;
+	DasStk_insert(&stk, 2, &elmt);
 	das_assert(DasStk_count(&stk) == 4, "test failed: DasStk_insert middle");
 	int j[] = {6, 2, 77, 7};
 	das_assert(memcmp(DasStk_data(&stk), j, DasStk_count(&stk) * sizeof(int)) == 0, "test failed: DasStk_insert middle");
 
 	elmt = 88;
-	DasStk_insert(&stk, 0);
-	*DasStk_get(&stk, 0) = elmt;
+	DasStk_insert(&stk, 0, &elmt);
 	das_assert(DasStk_count(&stk) == 5, "test failed: DasStk_insert start");
 	int k[] = {88, 6, 2, 77, 7};
 	das_assert(memcmp(DasStk_data(&stk), k, DasStk_count(&stk) * sizeof(int)) == 0, "test failed: DasStk_insert start");
 
 	elmt = 99;
-	DasStk_insert(&stk, 5);
-	*DasStk_get(&stk, 5) = elmt;
+	DasStk_insert(&stk, 5, &elmt);
 	das_assert(DasStk_count(&stk) == 6, "test failed: DasStk_insert end");
 	int l[] = {88, 6, 2, 77, 7, 99};
 	das_assert(memcmp(DasStk_data(&stk), l, DasStk_count(&stk) * sizeof(int)) == 0, "test failed: DasStk_insert end");
@@ -95,8 +90,7 @@ void deque_test() {
 	das_assert(deque && deque->front_idx == 0 && deque->back_idx == 0 && deque->cap >= 6, "test failed: DasDeque_resize_cap");
 
 	for (int i = 0; i < 10; i += 1) {
-		DasDeque_push_front(&deque);
-		*DasDeque_get(&deque, 0) = i; // initialize the value we pushed on
+		DasDeque_push_front(&deque, &i);
 		das_assert(DasDeque_count(&deque) == i + 1, "test failed: DasDeque_push_front enough to resize the capacity");
 	}
 
@@ -118,8 +112,7 @@ void deque_test() {
 	das_assert(deque && deque->front_idx == 0 && deque->back_idx == 0 && deque->cap >= 6, "test failed: DasDeque_resize_cap");
 
 	for (int i = 0; i < 10; i += 1) {
-		DasDeque_push_back(&deque);
-		*DasDeque_get_back(&deque, 0) = i; // initialize the value we pushed on
+		DasDeque_push_back(&deque, &i);
 		das_assert(DasDeque_count(&deque) == i + 1, "test failed: DasDeque_push_back enough to resize the capacity");
 	}
 

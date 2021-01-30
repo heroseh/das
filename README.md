@@ -14,7 +14,6 @@ A feature rich dynamic allocation library.
 - simple API to keep user code as simple as possible.
 	- zeroed memory is initialization
 	- no type decorations required on the Stack and Deque API
-	- few arguments as possible to promote an orthogonal API design
 - no executable bloat
 	- we define a single function for each operation, that can be used for all types of DasStk/DasDeque
 - fast compile times

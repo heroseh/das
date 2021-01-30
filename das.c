@@ -161,6 +161,19 @@ DasBool _DasStk_init_with_alctor(_DasStkHeader** header_out, uintptr_t header_si
 	return das_true;
 }
 
+DasBool _DasStk_init_clone_with_alctor(_DasStkHeader** dst_header_in_out, uintptr_t header_size, _DasStkHeader* src_header, DasAlctor alctor, uintptr_t elmt_size) {
+	if (!_DasStk_init_with_alctor(dst_header_in_out, header_size, src_header->count, alctor, elmt_size))
+		return das_false;
+
+	_DasStkHeader* dst_header = *dst_header_in_out;
+
+	void* dst = das_ptr_add(dst_header, header_size);
+	void* src = das_ptr_add(src_header, header_size);
+	memcpy(dst, src, src_header->count * elmt_size);
+	dst_header->count = src_header->count;
+	return das_true;
+}
+
 void _DasStk_deinit(_DasStkHeader** header_in_out, uintptr_t header_size, uintptr_t elmt_size) {
 	_DasStkHeader* header = *header_in_out;
 	uintptr_t size = header_size + header->cap * elmt_size;
@@ -225,7 +238,7 @@ DasBool _DasStk_resize_cap(_DasStkHeader** header_in_out, uintptr_t header_size,
 	return das_true;
 }
 
-DasBool _DasStk_insert_many(_DasStkHeader** header_in_out, uintptr_t header_size, uintptr_t idx, uintptr_t elmts_count, uintptr_t elmt_size) {
+void* _DasStk_insert_many(_DasStkHeader** header_in_out, uintptr_t header_size, uintptr_t idx, void* elmts, uintptr_t elmts_count, uintptr_t elmt_size) {
 	_DasStkHeader* header = *header_in_out;
 	das_assert(idx <= header->count, "insert idx '%zu' must be less than or equal to count of '%zu'", idx, header->count);
 	uintptr_t count = header ? header->count : 0;
@@ -237,7 +250,7 @@ DasBool _DasStk_insert_many(_DasStkHeader** header_in_out, uintptr_t header_size
     uintptr_t new_count = count + elmts_count;
     if (cap < new_count) {
 		DasBool res = _DasStk_resize_cap(header_in_out, header_size, das_max_u(new_count, cap * 2), elmt_size);
-		if (!res) return das_false;
+		if (!res) return NULL;
 		header = *header_in_out;
     }
 
@@ -248,11 +261,15 @@ DasBool _DasStk_insert_many(_DasStkHeader** header_in_out, uintptr_t header_size
 	// to make room for the elements
     memmove(das_ptr_add(dst, elmts_count * elmt_size), dst, (header->count - idx) * elmt_size);
 
+	if (elmts) {
+		memcpy(dst, elmts, elmts_count * elmt_size);
+	}
+
     header->count = new_count;
-	return das_true;
+	return dst;
 }
 
-uintptr_t _DasStk_push_many(_DasStkHeader** header_in_out, uintptr_t header_size, uintptr_t elmts_count, uintptr_t elmt_size) {
+void* _DasStk_push_many(_DasStkHeader** header_in_out, uintptr_t header_size, void* elmts, uintptr_t elmts_count, uintptr_t elmt_size) {
 	_DasStkHeader* header = *header_in_out;
 	uintptr_t count = header ? header->count : 0;
 	uintptr_t cap = header ? header->cap : 0;
@@ -264,12 +281,17 @@ uintptr_t _DasStk_push_many(_DasStkHeader** header_in_out, uintptr_t header_size
 	uintptr_t new_count = count + elmts_count;
 	if (new_count > cap) {
 		DasBool res = _DasStk_resize_cap(header_in_out, header_size, das_max_u(new_count, cap * 2), elmt_size);
-		if (!res) return UINTPTR_MAX;
+		if (!res) return NULL;
 		header = *header_in_out;
 	}
 
+	void* dst = das_ptr_add(header, header_size + idx * elmt_size);
+	if (elmts) {
+		memcpy(dst, elmts, elmts_count * elmt_size);
+	}
+
 	header->count = new_count;
-	return idx;
+	return dst;
 }
 
 uintptr_t _DasStk_pop_many(_DasStkHeader* header, uintptr_t elmts_count, uintptr_t elmt_size) {
@@ -320,14 +342,12 @@ void _DasStk_remove_shift_range(_DasStkHeader* header, uintptr_t header_size, ui
 	header->count -= remove_count;
 }
 
-uintptr_t DasStk_push_str(DasStk(char)* stk, char* str) {
+char* DasStk_push_str(DasStk(char)* stk, char* str) {
 	uintptr_t len = strlen(str);
-	uintptr_t idx = DasStk_push_many(stk, len);
-	memcpy(DasStk_get(stk, idx), str, len);
-	return idx;
+	return DasStk_push_many(stk, str, len);
 }
 
-uintptr_t DasStk_push_str_fmtv(DasStk(char)* stk, char* fmt, va_list args) {
+void* DasStk_push_str_fmtv(DasStk(char)* stk, char* fmt, va_list args) {
 	va_list args_copy;
 	va_copy(args_copy, args);
 
@@ -342,22 +362,22 @@ uintptr_t DasStk_push_str_fmtv(DasStk(char)* stk, char* fmt, va_list args) {
 	uintptr_t insert_idx = DasStk_count(stk);
 	uintptr_t new_count = DasStk_count(stk) + count;
 	DasBool res = DasStk_resize_cap(stk, new_count);
-	if (!res) return das_false;
+	if (!res) return NULL;
 
 	//
 	// now call vsnprintf for real this time, with a buffer
 	// to actually copy the formatted string.
 	char* ptr = das_ptr_add(DasStk_data(stk), insert_idx);
 	count = vsnprintf(ptr, count, fmt, args);
-	return insert_idx;
+	return ptr;
 }
 
-uintptr_t DasStk_push_str_fmt(DasStk(char)* stk, char* fmt, ...) {
+void* DasStk_push_str_fmt(DasStk(char)* stk, char* fmt, ...) {
 	va_list args;
 	va_start(args, fmt);
-	uintptr_t idx = DasStk_push_str_fmtv(stk, fmt, args);
+	void* ptr = DasStk_push_str_fmtv(stk, fmt, args);
 	va_end(args);
-	return idx;
+	return ptr;
 }
 
 // ======================================================================
@@ -495,7 +515,7 @@ void _DasDeque_read(_DasDequeHeader* header, uintptr_t header_size, uintptr_t id
 	} else {
 		//
 		// coping the elements can be done in a single copy
-		memcpy(elmts_out, das_ptr_add(data, (header->front_idx - elmts_count) * elmt_size), elmts_count * elmt_size);
+		memcpy(elmts_out, das_ptr_add(data, idx * elmt_size), elmts_count * elmt_size);
 	}
 }
 
@@ -519,36 +539,47 @@ void _DasDeque_write(_DasDequeHeader* header, uintptr_t header_size, uintptr_t i
 	} else {
 		//
 		// coping the elements can be done in a single copy
-		memcpy(das_ptr_add(data, (header->front_idx - elmts_count) * elmt_size), elmts, elmts_count * elmt_size);
+		memcpy(das_ptr_add(data, idx * elmt_size), elmts, elmts_count * elmt_size);
 	}
 }
 
-DasBool _DasDeque_push_front_many(_DasDequeHeader** header_in_out, uintptr_t header_size, uintptr_t elmts_count, uintptr_t elmt_size) {
+uintptr_t _DasDeque_push_front_many(_DasDequeHeader** header_in_out, uintptr_t header_size, void* elmts, uintptr_t elmts_count, uintptr_t elmt_size) {
 	_DasDequeHeader* header = *header_in_out;
 	uintptr_t new_count = DasDeque_count(header_in_out) + elmts_count;
 	uintptr_t cap = header ? header->cap : 0;
 	if (cap < new_count + 1) {
 		DasBool res = _DasDeque_resize_cap(header_in_out, header_size, das_max_u(cap * 2, new_count), elmt_size);
-		if (!res) return das_false;
+		if (!res) return UINTPTR_MAX;
 		header = *header_in_out;
 	}
 
 	header->front_idx = _DasDeque_wrapping_sub(header->cap, header->front_idx, elmts_count);
-	return das_true;
+
+	if (elmts) {
+		_DasDeque_write(header, header_size, 0, elmts, elmts_count, elmt_size);
+	}
+
+	return 0;
 }
 
-DasBool _DasDeque_push_back_many(_DasDequeHeader** header_in_out, uintptr_t header_size, uintptr_t elmts_count, uintptr_t elmt_size) {
+uintptr_t _DasDeque_push_back_many(_DasDequeHeader** header_in_out, uintptr_t header_size, void* elmts, uintptr_t elmts_count, uintptr_t elmt_size) {
 	_DasDequeHeader* header = *header_in_out;
-	uintptr_t new_count = DasDeque_count(header_in_out) + elmts_count;
+	uintptr_t insert_idx = DasDeque_count(header_in_out);
+	uintptr_t new_count = insert_idx + elmts_count;
 	uintptr_t cap = header ? header->cap : 0;
 	if (cap < new_count + 1) {
 		DasBool res = _DasDeque_resize_cap(header_in_out, header_size, das_max_u(cap * 2, new_count), elmt_size);
-		if (!res) return das_false;
+		if (!res) return UINTPTR_MAX;
 		header = *header_in_out;
 	}
 
 	header->back_idx = _DasDeque_wrapping_add(header->cap, header->back_idx, elmts_count);
-	return das_true;
+
+	if (elmts) {
+		_DasDeque_write(header, header_size, insert_idx, elmts, elmts_count, elmt_size);
+	}
+
+	return insert_idx;
 }
 
 uintptr_t _DasDeque_pop_front_many(_DasDequeHeader* header, uintptr_t elmts_count, uintptr_t elmt_size) {

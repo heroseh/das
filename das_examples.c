@@ -4,29 +4,40 @@
 void stk_example() {
 	// a zeroed stack is the default,
 	// you can actually start pushing elements directly on this.
-	DasStk(int) stk = 0;
+	DasStk(int) stk = NULL;
 
 
 	// you can also preallocate the stack to hold atleast 6 int elements.
-	DasStk_resize_cap(&stk, 6);
+	DasStk_init_with_cap(&stk, 6);
+
+	// or maybe use a custom allocator (advanced)
+	DasStk_init_with_alctor(&stk, 6, DasAlctor_system);
 
 
 
-	// pushes an uninitialized element on the end of the stack.
-	// returns an index to the first new element in the stack.
-	// idx will be UINTPTR_MAX if allocation failed.
-	// it is then initialize to a value of zero.
+
+	// pushes 0 on the end of the stack.
 	// our stack then looks like this: [ 0 ]
-	uintptr_t idx = DasStk_push(&stk);
-	*DasStk_get(&stk, idx) = 0;
+	int elmt = 0;
+	DasStk_push(&stk, &elmt);
 
 
 
-	// pushes 1, 2, 3, 4 on the end of the stack.
+	// passing a NULL pointer makes room at the end of the stack
+	// this function also returns a pointer to the new element.
+	// so we can then write to the element through the pointer instead.
+	// this is useful for pushing on big data structures,
+	// so you don't have to construct it on the call stack first.
+	// our stack then looks like this: [ 0, 1 ]
+	int* uninit_elmt = DasStk_push(&stk, NULL);
+	*uninit_elmt = 1;
+
+
+
+	// pushes 2, 3, 4 on the end of the stack.
 	// our stack then looks like this: [ 0, 1, 2, 3, 4 ]
-	for (int i = 1; i < 5; i += 1) {
-		idx = DasStk_push(&stk);
-		*DasStk_get(&stk, idx) = i;
+	for (int i = 2; i < 5; i += 1) {
+		DasStk_push(&stk, &i);
 	}
 
 
@@ -64,14 +75,12 @@ void stk_example() {
 
 
 
-	// pushes 5 uninitialized elements on the end of the stack.
-	// returns an index to the first new element in the stack.
-	// idx will be UINTPTR_MAX if allocation failed.
-	// the elements are then is then initialize with a loop.
-	idx = DasStk_push_many(&stk, 5);
-	for (uintptr_t i = 5; i < 10; i += 1) {
-		*DasStk_get(&stk, i) = i;
-	}
+	// pushes this array of 5 elements on the end of the stack.
+	// our stack then looks like this: [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 ]
+	// NULL can also be passed to push_many if you don't wish to copy anything right away.
+	// a pointer is returned to the first new element.
+	int five_to_nine[] = { 5, 6, 7, 8, 9 };
+	int* new_elmts = DasStk_push_many(&stk, five_to_nine, 5);
 
 
 
@@ -133,10 +142,7 @@ void stk_example() {
 
 	// lets get our stack to look like this again: [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 ]
 	int zero_to_nine[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
-	DasStk_push_many(&stk, 10);
-	for (uintptr_t i = 0; i < 10; i += 1) {
-		*DasStk_get(&stk, i) = i;
-	}
+	DasStk_push_many(&stk, zero_to_nine, 10);
 
 
 
@@ -173,8 +179,8 @@ void stk_example() {
 	// insert an element at an index by shifting the elements from that point to the right.
 	// insert with an index of 3
 	// our stack then looks like this: [ 0, 1, 2, 77, 6, 7, 5 ]
-	DasStk_insert(&stk, 3);
-	*DasStk_get(&stk, 3) = 77;
+	int insert_value = 77;
+	DasStk_insert(&stk, 3, &insert_value);
 
 
 
@@ -183,8 +189,8 @@ void stk_example() {
 	// this is useful for inserting big data structures,
 	// so you don't have to construct it on the call stack first.
 	// our stack then looks like this: [ 0, 1, 67, 2, 77, 6, 7, 5 ]
-	DasStk_insert(&stk, 2);
-	*DasStk_get(&stk, 2) = 67;
+	int* elmt_insert_ptr = DasStk_insert(&stk, 2, NULL);
+	*elmt_insert_ptr = 67;
 
 	//
 	// we also have DasStk_insert_many that works like DasStk_insert
@@ -250,15 +256,17 @@ void deque_example() {
 
 
 	// initializes the deque to hold 6 int elements before needing to reallocate.
-	DasDeque_resize_cap(&deque, 6);
+	DasDeque_init_with_cap(&deque, 6);
+
+	// or maybe use a custom allocator (advanced)
+	DasDeque_init_with_alctor(&deque, 6, DasAlctor_system);
 
 
 
 	// push elements 0 to 10 on the back of the deque one by one.
 	// deque data will look like: [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 ]
 	for (int i = 0; i < 10; i += 1) {
-		DasDeque_push_back(&deque);
-		*DasDeque_get_last(&deque) = i;
+		DasDeque_push_back(&deque, &i);
 	}
 
 
@@ -283,8 +291,7 @@ void deque_example() {
 	// we can then push a value on the front.
 	// deque data will look like: [ 9, 3, 4, 5, 6, 7, 8 ]
 	// popped_elmt will be 9
-	popped_elmt = *DasDeque_get(&deque, 0);
-	DasDeque_push_front(&deque);
+	DasDeque_push_front(&deque, &popped_elmt);
 
 
 	// get 3rd element in the queue.
