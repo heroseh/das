@@ -7,7 +7,9 @@ A feature rich dynamic allocation library.
 - double ended queue (DasDeque)
 - custom allocator interface (DasAlctor)
 - allocation API that use custom allocators (das_alloc, das_realloc, das_dealloc)
+- unbuffered file abstraction
 - virtual memory abstraction
+- growable & virtual memory backed linear allocator and element pool
 - compiles as ISO C99
 - simple API to keep user code as simple as possible.
 	- zeroed memory is initialization

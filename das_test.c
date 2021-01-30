@@ -383,11 +383,106 @@ void virt_mem_tests() {
 #undef RUN_FAIL_TEST
 }
 
+typedef struct Entity Entity;
+struct Entity {
+	char data[64];
+};
+
+typedef_DasPoolElmtId(EntityId, 20);
+typedef_DasPool(EntityId, Entity);
+
+void pool_tests() {
+	DasPool(EntityId, Entity) pool;
+
+	uintptr_t max_entities_count = 50000; // 3.2MBs
+	uintptr_t entities_grow_size = 256; // 16KB
+
+	DasPool_init(EntityId, &pool, max_entities_count, entities_grow_size);
+	max_entities_count = pool.reserved_cap;
+
+	{
+		//
+		// allocated the maximum number of entities.
+		//
+		for (uint32_t i = 0; i < max_entities_count; i += 1) {
+			EntityId id;
+			das_assert(
+				DasPool_alloc(EntityId, &pool, &id),
+				"allocation should not fail"
+			);
+		}
+	}
+
+
+	{
+		//
+		// make sure the allocated linked list is setup in order.
+		//
+
+		EntityId id = EntityId_null;
+		uint32_t expected_idx = 0;
+		uint32_t stop_at_idx = 20;
+		while (1) {
+			id = DasPool_iter_next(EntityId, &pool, id);
+			if (id.raw == 0)
+				break;
+
+			uint32_t idx = DasPool_id_to_idx(EntityId, &pool, id);
+			das_assert(idx == expected_idx, "when iterating forwards we expected in index of %u but got %u\n", expected_idx, idx);
+			if (idx == stop_at_idx) break;
+			expected_idx += 1;
+		}
+
+		id = EntityId_null;
+		expected_idx = max_entities_count - 1;
+		stop_at_idx = max_entities_count - 20;
+		while (1) {
+			id = DasPool_iter_prev(EntityId, &pool, id);
+			if (id.raw == 0)
+				break;
+
+			uint32_t idx = DasPool_id_to_idx(EntityId, &pool, id);
+			das_assert(idx == expected_idx, "when iterating backwards we expected in index of %u but got %u\n", expected_idx, idx);
+			if (idx == stop_at_idx) break;
+			expected_idx -= 1;
+		}
+	}
+
+	{
+		//
+		// ensure the counter will wrap around to 0 when it overflows
+		//
+		uint32_t counter_mask = DasPoolElmtId_counter_mask(EntityId_index_bits);
+		uint32_t counter_max = counter_mask >> EntityId_index_bits;
+		EntityId id = EntityId_null;
+		id = DasPool_iter_next(EntityId, &pool, id);
+		uint32_t expected_counter = 0;
+		uint32_t found_zero_count = 0;
+		while (found_zero_count < 2) {
+			uint32_t counter = (id.raw & counter_mask) >> EntityId_index_bits;
+			das_assert(counter == expected_counter, "expected counter to be %u but got %u\n", expected_counter, counter);
+
+			DasPool_dealloc(EntityId, &pool, id);
+
+			DasPool_alloc(EntityId, &pool, &id);
+			if (expected_counter == 0)
+				found_zero_count += 1;
+
+			if (expected_counter == counter_max) {
+				expected_counter = 0;
+			} else {
+				expected_counter += 1;
+			}
+		}
+	}
+}
+
 int main(int argc, char** argv) {
 	alloc_test();
 	stk_test();
 	deque_test();
 	virt_mem_tests();
+	pool_tests();
 
 	printf("all tests were successful\n");
 	return 0;

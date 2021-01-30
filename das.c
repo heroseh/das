@@ -6,7 +6,6 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <asm-generic/mman.h>
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
@@ -742,7 +741,7 @@ DasError das_file_close(DasFileHandle handle) {
 DasError das_file_size(DasFileHandle handle, uint64_t* size_out) {
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
 	// get the size of the file
-	struct stat s = {};
+	struct stat s = {0};
 	if (fstat(handle.raw, &s) != 0) return _das_get_last_error();
 	*size_out = s.st_size;
 #elif _WIN32
@@ -1240,5 +1239,515 @@ void* DasLinearAlctor_alloc_fn(void* alctor_data, void* ptr, uintptr_t old_size,
 	}
 
 	return NULL;
+}
+
+// ===========================================================================
+//
+//
+// Pool
+//
+//
+// ===========================================================================
+
+static inline _DasPoolRecord* _DasPool_records(_DasPool* pool, uintptr_t elmt_size) {
+	return das_ptr_add(pool->address_space, (uintptr_t)pool->reserved_cap * elmt_size);
+}
+
+static inline DasPoolElmtId _DasPool_record_to_id(_DasPool* pool, _DasPoolRecord* record, uint32_t idx_id, uint32_t index_bits) {
+	DasPoolElmtId index_mask = (1 << index_bits) - 1;
+	DasPoolElmtId id = record->next_id;
+	id &= ~index_mask; // clear out the index id that points to the next record
+	id |= idx_id; // now store the index id that points to this record
+	return id;
+}
+
+static void _DasPool_assert_id(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits) {
+	das_assert(elmt_id, "the element id cannot be null");
+	das_assert(elmt_id & DasPoolElmtId_is_allocated_bit_MASK, "the provided element identifier does not have the allocated bit set.");
+	DasPoolElmtId index_mask = (1 << index_bits) - 1;
+	uint32_t idx_id = elmt_id & index_mask;
+	das_assert(idx_id, "the index identifier cannot be null");
+	_DasPoolRecord* record = &_DasPool_records(pool, elmt_size)[idx_id - 1];
+
+	DasPoolElmtId counter_mask = DasPoolElmtId_counter_mask(index_bits);
+	uint32_t counter = (elmt_id & counter_mask) >> index_bits;
+	uint32_t record_counter = (record->next_id & counter_mask) >> index_bits;
+	das_assert(counter == record_counter, "use after free detected... the provided element identifier has a counter of '%u' but the internal one is '%u'", counter, record_counter);
+}
+
+DasError _DasPool_init(_DasPool* pool, uint32_t reserved_cap, uint32_t commit_grow_count, uintptr_t elmt_size) {
+	das_zero_elmt(pool);
+
+	uintptr_t reserve_align;
+	uintptr_t page_size;
+	DasError error = das_virt_mem_page_size(&page_size, &reserve_align);
+	if (error) return error;
+
+	//
+	// reserve the whole address space for the elements array and the records array.
+	uintptr_t elmts_size = das_round_up_nearest_multiple_u((uintptr_t)reserved_cap * elmt_size, reserve_align);
+	uintptr_t records_size = das_round_up_nearest_multiple_u((uintptr_t)reserved_cap * sizeof(_DasPoolRecord), reserve_align);
+	uintptr_t reserved_size = elmts_size + records_size;
+	error = das_virt_mem_reserve(NULL, reserved_size, &pool->address_space);
+	if (error) return error;
+
+	//
+	// see how many elements we can actually fit in the rounded up reserved size of the elements.
+	reserved_cap = elmts_size / elmt_size;
+
+	//
+	// see how many elements we can actually grow by rounding up grow size to the page size.
+	uintptr_t commit_grow_size = das_round_down_nearest_multiple_u((uintptr_t)commit_grow_count * elmt_size, page_size);
+	commit_grow_count = commit_grow_size / elmt_size;
+
+	pool->page_size = page_size;
+	pool->reserved_cap = reserved_cap;
+	pool->commit_grow_count = commit_grow_count;
+
+	return DasError_success;
+}
+
+DasError _DasPool_deinit(_DasPool* pool, uintptr_t elmt_size) {
+	uintptr_t reserve_align;
+	uintptr_t page_size;
+	DasError error = das_virt_mem_page_size(&page_size, &reserve_align);
+	if (error) return error;
+
+	//
+	// decommit and release the reserved address space
+	uintptr_t elmts_size = das_round_up_nearest_multiple_u((uintptr_t)pool->reserved_cap * elmt_size, reserve_align);
+	uintptr_t records_size = das_round_up_nearest_multiple_u((uintptr_t)pool->reserved_cap * sizeof(_DasPoolRecord), reserve_align);
+	uintptr_t reserved_size = elmts_size + records_size;
+	error = das_virt_mem_release(pool->address_space, reserved_size);
+	if (error) return error;
+
+	*pool = (_DasPool){0};
+	return DasError_success;
+}
+
+DasError _DasPool_reset(_DasPool* pool, uintptr_t elmt_size) {
+	if (pool->commited_cap == 0)
+		return DasError_success;
+
+	uintptr_t elmts_size = das_round_up_nearest_multiple_u((uintptr_t)pool->commited_cap * elmt_size, pool->page_size);
+	uintptr_t records_size = das_round_up_nearest_multiple_u((uintptr_t)pool->commited_cap * sizeof(_DasPoolRecord), pool->page_size);
+	void* elmts = pool->address_space;
+	_DasPoolRecord* records = _DasPool_records(pool, elmt_size);
+
+	//
+	// decommit all of the commited pages of memory for the elements
+	DasError error = das_virt_mem_decommit(elmts, elmts_size);
+	if (error) return error;
+
+	//
+	// decommit all of the commited pages of memory for the records
+	error = das_virt_mem_decommit(records, elmts_size);
+	if (error) return error;
+
+	pool->count = 0;
+	pool->cap = 0;
+	pool->commited_cap = 0;
+	pool->free_list_head_id = 0;
+	pool->alloced_list_head_id = 0;
+	pool->alloced_list_tail_id = 0;
+	return DasError_success;
+}
+
+DasBool _DasPool_commit_next_chunk(_DasPool* pool, uintptr_t elmt_size) {
+	if (pool->commited_cap == pool->reserved_cap)
+		return das_false;
+
+	uintptr_t grow_count = das_min_u(pool->commit_grow_count, pool->reserved_cap - pool->commited_cap);
+
+	uintptr_t elmts_size = das_round_up_nearest_multiple_u((uintptr_t)pool->commited_cap * elmt_size, pool->page_size);
+	uintptr_t records_size = das_round_up_nearest_multiple_u((uintptr_t)pool->commited_cap * sizeof(_DasPoolRecord), pool->page_size);
+
+	//
+	// commit the next chunk of memory at the end of the currently commited elments
+	void* elmts_to_commit = das_ptr_add(pool->address_space, elmts_size);
+	uintptr_t elmts_grow_size = das_round_up_nearest_multiple_u((uintptr_t)grow_count * elmt_size, pool->page_size);
+	DasError error = das_virt_mem_commit(elmts_to_commit, elmts_grow_size, DasVirtMemProtection_read_write);
+	das_assert(error == 0, "unexpected error our parameters should be correct: 0x%x", error);
+
+	//
+	// commit the next chunk of memory at the end of the currently commited records
+	_DasPoolRecord* records_to_commit = das_ptr_add(_DasPool_records(pool, elmt_size), records_size);
+	uintptr_t records_grow_size = das_round_up_nearest_multiple_u((uintptr_t)grow_count * sizeof(_DasPoolRecord), pool->page_size);
+	error = das_virt_mem_commit(records_to_commit, records_grow_size, DasVirtMemProtection_read_write);
+	das_assert(error == 0, "unexpected error our parameters should be correct: 0x%x", error);
+
+	//
+	// calculate commited_cap by using the new elements size in bytes and dividing to get an accurate number.
+	// adding the grow_count will lose precision if the elmt_size is not directly divisble by the page_size.
+	uintptr_t new_elmts_size = elmts_size + elmts_grow_size;
+	pool->commited_cap = new_elmts_size / elmt_size;
+
+	return das_true;
+}
+
+DasError _DasPool_reset_and_populate(_DasPool* pool, void* elmts, uint32_t count, uintptr_t elmt_size) {
+	DasError error = _DasPool_reset(pool, elmt_size);
+	if (error) return error;
+
+	while (pool->commited_cap < count) {
+		if (!_DasPool_commit_next_chunk(pool, elmt_size)) {
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+			return EOVERFLOW;
+#elif _WIN32
+			return ERROR_BUFFER_OVERFLOW;
+#endif
+		}
+	}
+
+	//
+	// set the records for the elements passed in to the function to allocated and point to the next element.
+	_DasPoolRecord* records = _DasPool_records(pool, elmt_size);
+	for (uint32_t i = 0; i < count; i += 1) {
+		records[i].prev_id = i; // the current index is the identifier of the previous record
+		records[i].next_id = DasPoolElmtId_is_allocated_bit_MASK | (i + 2); // + 2 as identifiers are +1 an index
+	}
+
+	//
+	// copy the elements and set the values in the pool structure
+	memcpy(pool->address_space, elmts, (uintptr_t)count * elmt_size);
+	pool->count = count;
+	pool->cap = count;
+
+	return DasError_success;
+}
+
+void* _DasPool_alloc(_DasPool* pool, DasPoolElmtId* id_out, uintptr_t elmt_size, uint32_t index_bits) {
+	//
+	// if the pool is full, try to increment the capacity by one if we have enough commit memory.
+	// if not commit a new chunk.
+	// if the pool is not full allocate from the head of the free list.
+	uint32_t idx_id;
+	if (pool->count == pool->cap) {
+		if (pool->cap == pool->commited_cap) {
+			if (!_DasPool_commit_next_chunk(pool, elmt_size))
+				return NULL;
+		}
+
+		pool->cap += 1;
+		idx_id = pool->cap;
+	} else {
+		idx_id = pool->free_list_head_id;
+	}
+
+	//
+	// allocate an element by removing it from the free list
+	// and adding it to the allocated list.
+	//
+
+	DasPoolElmtId index_mask = (1 << index_bits) - 1;
+	uint32_t idx = idx_id - 1;
+	_DasPoolRecord* records = _DasPool_records(pool, elmt_size);
+	_DasPoolRecord* record_ptr = &records[idx];
+	DasPoolElmtId record = record_ptr->next_id;
+
+	das_debug_assert(record_ptr->prev_id == 0, "the surposedly free list head links to a previous element... so it is not the list head");
+	das_debug_assert(!(record & DasPoolElmtId_is_allocated_bit_MASK), "allocated element is in the free list of the pool");
+
+	// set the is allocated bit
+	record |= DasPoolElmtId_is_allocated_bit_MASK;
+
+	// get the next free id from the record
+	uint32_t next_free_idx_id = record & index_mask;
+
+	// clear the index id
+	record &= ~index_mask;
+
+	//
+	// create pool identifier by strapping the index id to it.
+	*id_out = record | idx_id;
+
+	record_ptr->next_id = record;
+
+	//
+	// make the next free record the new list head
+	if (next_free_idx_id && next_free_idx_id - 1 < pool->cap) {
+		records[next_free_idx_id - 1].prev_id = 0;
+	}
+
+	//
+	// make the old allocated list tail point to the newly allocated element.
+	// and we will then point back to it.
+	if (pool->alloced_list_tail_id) {
+		records[pool->alloced_list_tail_id - 1].next_id |= idx_id;
+		record_ptr->prev_id = pool->alloced_list_tail_id;
+	}
+
+	if (pool->alloced_list_head_id == 0) {
+		pool->alloced_list_head_id = idx_id;
+	}
+
+	void* allocated_elmt = das_ptr_add(pool->address_space, (uintptr_t)idx * elmt_size);
+	if (idx_id == pool->free_list_head_id) {
+		// data comes from the free list so lets zero it.
+		memset(allocated_elmt, 0, elmt_size);
+	}
+
+	//
+	// update the list head/tail ids
+	//
+	pool->free_list_head_id = next_free_idx_id;
+	pool->alloced_list_tail_id = idx_id;
+	pool->count += 1;
+
+	return allocated_elmt;
+}
+
+void _DasPool_dealloc(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits) {
+	_DasPool_assert_id(pool, elmt_id, elmt_size, index_bits);
+
+	DasPoolElmtId index_mask = (1 << index_bits) - 1;
+
+	_DasPoolRecord* records = _DasPool_records(pool, elmt_size);
+	uint32_t dealloced_idx_id = elmt_id & index_mask;
+	_DasPoolRecord* dealloced_record_ptr = &records[dealloced_idx_id - 1];
+	DasPoolElmtId dealloced_record = dealloced_record_ptr->next_id;
+
+	uint32_t prev_allocated_elmt_id = dealloced_record_ptr->prev_id;
+	uint32_t next_allocated_elmt_id = dealloced_record & index_mask;
+
+
+	//
+	// place the deallocated element in the free list somewhere.
+	//
+	uint32_t next_free_idx_id = pool->free_list_head_id;
+	if (pool->order_free_list_on_dealloc && next_free_idx_id < dealloced_idx_id) {
+		//
+		// we have order the free list enabled, so store in low to high order.
+		// this will keep allocations new allocations closer to eachother.
+		// move up the free list until the deallocating elmt_id is less than that index id the record points to.
+		DasPoolElmtId* elmt_next_free_idx_id;
+		uint32_t nfi = next_free_idx_id;
+		uint32_t count = pool->count;
+		for (uint32_t i = 0; i < count; i += 1) {
+			elmt_next_free_idx_id = &records[nfi - 1].next_id;
+			nfi = *elmt_next_free_idx_id & index_bits;
+			if (nfi > dealloced_idx_id) break;
+		}
+
+		//
+		// now make the record point this deallocated record instead
+		//
+		DasPoolElmtId record = *elmt_next_free_idx_id;
+
+		//
+		// before we do, make the record we used to point to, point back to the deallocated element instead.
+		if (nfi) {
+			records[nfi - 1].prev_id = dealloced_idx_id;
+		}
+		dealloced_record_ptr->prev_id = nfi;
+
+		record &= ~index_mask; // clear the index id that points to the original next free element
+		record |= dealloced_idx_id; // set the index id of the deallocated element
+		*elmt_next_free_idx_id = record;
+
+		next_free_idx_id = nfi;
+	} else {
+		//
+		// place at the head of the free list
+		pool->free_list_head_id = dealloced_idx_id;
+		dealloced_record_ptr->prev_id = 0;
+	}
+
+	//
+	// "free" the element by updating the records.
+	//
+	{
+		//
+		// go to the next element our deallocated element used to point to and make it point back to
+		// the previous element the deallocated element used to point to.
+		if (next_allocated_elmt_id) {
+			records[next_allocated_elmt_id - 1].prev_id = prev_allocated_elmt_id;
+		} else {
+			pool->alloced_list_tail_id = prev_allocated_elmt_id;
+		}
+
+		if (prev_allocated_elmt_id) {
+			_DasPoolRecord* pr = &records[prev_allocated_elmt_id - 1];
+			DasPoolElmtId r = pr->next_id;
+			r &= ~index_mask; // clear the index that points to the element we have just deallocated
+			r |= next_allocated_elmt_id; // now make it point to the element our deallocated element used to point to.
+			pr->next_id = r;
+		} else {
+			pool->alloced_list_head_id = next_allocated_elmt_id;
+		}
+
+		//
+		// extract the counter and then increment it's value.
+		// but make sure it wrap if we reach the maximum the counter bits can hold.
+		//
+		DasPoolElmtId counter_mask = DasPoolElmtId_counter_mask(index_bits);
+		uint32_t counter = (elmt_id & counter_mask) >> index_bits;
+		uint32_t counter_max = counter_mask >> index_bits;
+		if (counter == counter_max) {
+			counter = 0;
+		} else {
+			counter += 1;
+		}
+
+		//
+		// now update the counter by clearing and setting.
+		dealloced_record &= ~counter_mask;
+		dealloced_record |= counter << index_bits;
+
+		//
+		// now set the index to the next element in the free list.
+		dealloced_record &= ~index_mask;
+		dealloced_record |= next_free_idx_id;
+
+		//
+		// clear the is allocated bit then store the record back in the array.
+		dealloced_record &= ~DasPoolElmtId_is_allocated_bit_MASK;
+		dealloced_record_ptr->next_id = dealloced_record;
+	}
+
+	pool->count -= 1;
+}
+
+void* _DasPool_id_to_ptr(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits) {
+	_DasPool_assert_id(pool, elmt_id, elmt_size, index_bits);
+	DasPoolElmtId index_mask = (1 << index_bits) - 1;
+	uint32_t idx = (elmt_id & index_mask) - 1;
+	return das_ptr_add(pool->address_space, (uintptr_t)idx * elmt_size);
+}
+
+uint32_t _DasPool_id_to_idx(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits) {
+	_DasPool_assert_id(pool, elmt_id, elmt_size, index_bits);
+	DasPoolElmtId index_mask = (1 << index_bits) - 1;
+	return (elmt_id & index_mask) - 1;
+}
+
+DasPoolElmtId _DasPool_ptr_to_id(_DasPool* pool, void* ptr, uintptr_t elmt_size, uint32_t index_bits) {
+	das_debug_assert(pool->address_space <= ptr && ptr < das_ptr_add(pool->address_space, (uintptr_t)pool->cap * elmt_size), "pointer was not allocated with this pool");
+	uint32_t idx = das_ptr_diff(ptr, pool->address_space) / elmt_size;
+	_DasPoolRecord* record = &_DasPool_records(pool, elmt_size)[idx];
+	das_debug_assert(record->next_id & DasPoolElmtId_is_allocated_bit_MASK, "the pointer is a freed element");
+
+	//
+	// lets make an identifier from the record by just setting the index in it.
+	return _DasPool_record_to_id(pool, record, idx + 1, index_bits);
+}
+
+uint32_t _DasPool_ptr_to_idx(_DasPool* pool, void* ptr, uintptr_t elmt_size, uint32_t index_bits) {
+	das_debug_assert(pool->address_space <= ptr && ptr < das_ptr_add(pool->address_space, (uintptr_t)pool->cap * elmt_size), "pointer was not allocated with this pool");
+	uint32_t idx = das_ptr_diff(ptr, pool->address_space) / elmt_size;
+	_DasPoolRecord* record = &_DasPool_records(pool, elmt_size)[idx];
+	das_debug_assert(record->next_id & DasPoolElmtId_is_allocated_bit_MASK, "the pointer is a freed element");
+	return idx;
+}
+
+void* _DasPool_idx_to_ptr(_DasPool* pool, uint32_t idx, uintptr_t elmt_size) {
+	das_assert(idx < pool->cap, "index of '%u' is out of the pool boundary of '%u' elements", idx, pool->cap);
+
+	_DasPoolRecord* record = &_DasPool_records(pool, elmt_size)[idx];
+	das_debug_assert(record->next_id & DasPoolElmtId_is_allocated_bit_MASK, "the index is a freed element");
+
+	return das_ptr_add(pool->address_space, (uintptr_t)idx * elmt_size);
+}
+
+DasPoolElmtId _DasPool_idx_to_id(_DasPool* pool, uint32_t idx, uintptr_t elmt_size, uint32_t index_bits) {
+	das_assert(idx < pool->cap, "index of '%u' is out of the pool boundary of '%u' elements", idx, pool->cap);
+
+	_DasPoolRecord* record = &_DasPool_records(pool, elmt_size)[idx];
+	das_debug_assert(record->next_id & DasPoolElmtId_is_allocated_bit_MASK, "the index is a freed element");
+
+	//
+	// lets make an identifier from the record by just setting the index in it.
+	return _DasPool_record_to_id(pool, record, idx + 1, index_bits);
+}
+
+DasPoolElmtId _DasPool_iter_next(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits) {
+	//
+	// if NULL is passed in, then get the first record of the allocated list.
+	if (elmt_id == 0) {
+		uint32_t first_allocated_id = pool->alloced_list_head_id;
+		if (first_allocated_id == 0)
+			return 0;
+
+		return _DasPool_idx_to_id(pool, first_allocated_id - 1, elmt_size, index_bits);
+	}
+
+	_DasPool_assert_id(pool, elmt_id, elmt_size, index_bits);
+	//
+	// extract the index from the element identifier
+	DasPoolElmtId index_mask = (1 << index_bits) - 1;
+	uint32_t idx_id = elmt_id & index_mask;
+
+	//
+	// get the record for the element
+	_DasPoolRecord* records = _DasPool_records(pool, elmt_size);
+	DasPoolElmtId record = records[idx_id - 1].next_id;
+
+	//
+	// extract the next element index from the record
+	uint32_t next_idx_id = record & index_mask;
+	if (next_idx_id == 0) return 0;
+
+	//
+	// now convert the next record to an identifier for that next record/element
+	_DasPoolRecord* next_record = &records[next_idx_id - 1];
+	return _DasPool_record_to_id(pool, next_record, next_idx_id, index_bits);
+}
+
+DasPoolElmtId _DasPool_iter_prev(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits) {
+	//
+	// if NULL is passed in, then get the last record of the allocated list.
+	if (elmt_id == 0) {
+		uint32_t last_allocated_id = pool->alloced_list_tail_id;
+		if (last_allocated_id == 0)
+			return 0;
+
+		return _DasPool_idx_to_id(pool, last_allocated_id - 1, elmt_size, index_bits);
+	}
+
+	_DasPool_assert_id(pool, elmt_id, elmt_size, index_bits);
+	//
+	// extract the index from the element identifier
+	DasPoolElmtId index_mask = (1 << index_bits) - 1;
+	uint32_t idx_id = elmt_id & index_mask;
+
+	//
+	// get the record for the element
+	_DasPoolRecord* records = _DasPool_records(pool, elmt_size);
+	uint32_t prev_idx_id = records[idx_id - 1].prev_id;
+	if (prev_idx_id == 0) return 0;
+
+	//
+	// now convert the previous record to an identifier for that previous record/element
+	_DasPoolRecord* prev_record = &records[prev_idx_id - 1];
+	return _DasPool_record_to_id(pool, prev_record, prev_idx_id, index_bits);
+}
+
+DasPoolElmtId _DasPool_decrement_record_counter(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits) {
+	_DasPool_assert_id(pool, elmt_id, elmt_size, index_bits);
+	DasPoolElmtId index_mask = (1 << index_bits) - 1;
+	uint32_t idx_id = elmt_id & index_mask;
+	_DasPoolRecord* record = &_DasPool_records(pool, elmt_size)[idx_id - 1];
+
+	DasPoolElmtId counter_mask = DasPoolElmtId_counter_mask(index_bits);
+	uint32_t counter = (elmt_id & counter_mask) >> index_bits;
+	uint32_t counter_max = counter_mask >> index_bits;
+	if (counter == 0) {
+		counter = counter_max;
+	} else {
+		counter -= 1;
+	}
+
+	//
+	// now update the counter by clearing and setting.
+	record->next_id &= ~counter_mask;
+	record->next_id |= counter << index_bits;
+
+	return _DasPool_record_to_id(pool, record, idx_id, index_bits);
+}
+
+DasBool _DasPool_is_idx_allocated(_DasPool* pool, uint32_t idx, uintptr_t elmt_size) {
+	das_assert(idx < pool->cap, "index of '%u' is out of the pool boundary of '%u' elements", idx, pool->cap);
+	_DasPoolRecord* record = &_DasPool_records(pool, elmt_size)[idx];
+	return (record->next_id & DasPoolElmtId_is_allocated_bit_MASK) == DasPoolElmtId_is_allocated_bit_MASK;
 }
 

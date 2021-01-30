@@ -59,7 +59,7 @@ typedef uint8_t DasBool;
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #define das_noreturn _Noreturn
 #elif defined(__GNUC__)
-#define das_noreturn __attribute__((das_noreturn))
+#define das_noreturn __attribute__((noreturn))
 #elif _WIN32
 #define das_noreturn __declspec(noreturn)
 #else
@@ -978,7 +978,7 @@ DasError das_virt_mem_release(void* addr, uintptr_t size);
 
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
 typedef void* DasMapFileHandle; // unused
-#else
+#elif _WIN32
 typedef HANDLE DasMapFileHandle;
 #endif
 
@@ -1062,7 +1062,8 @@ DasError DasLinearAlctor_init(DasLinearAlctor* alctor, uintptr_t reserved_size, 
 //
 // deinitializes the linear allocator and release the address space back to the OS
 //
-// @param(alctor): a pointer the linear allocator structure to initialize.
+// @param(alctor): a pointer the linear allocator structure.
+//
 // @return: 0 on success, otherwise a error code to indicate the error.
 //
 DasError DasLinearAlctor_deinit(DasLinearAlctor* alctor);
@@ -1087,6 +1088,395 @@ void* DasLinearAlctor_alloc_fn(void* alctor_data, void* ptr, uintptr_t old_size,
 // creates an instance of the DasAlctor interface using a DasLinearAlctor.
 #define DasLinearAlctor_as_das(linear_alctor_ptr) \
 	(DasAlctor){ .fn = DasLinearAlctor_alloc_fn, .data = linear_alctor_ptr };
+
+// ===========================================================================
+//
+//
+// Pool
+//
+//
+// ===========================================================================
+// an optimized way of allocating lots of the same element type quickly.
+// the allocated elements are linked so can be iterated.
+// elements can be accessed by a validated identifier, index or pointer.
+//
+// it doesn't make sense making this allocator use the DasAlctor interface.
+// it is very limited only being able to allocate elements of the same type.
+// and the validated identifier should be the main way the elements are accessed.
+//
+
+//
+// this type contains an is allocated bit, a counter and an index.
+// the number of bits the index uses is passed in to most pool functions.
+// the allocated bit is at the MSB.
+// this means the counter bits can be workout by removing the index bits and allocated bit from the equation.
+//
+// eg. index_bits = 20
+//
+// index mask:       0x000fffff
+// counter mask:     0x7ff00000
+// is allocated bit: 0x80000000
+//
+typedef uint32_t DasPoolElmtId;
+#define DasPoolElmtId_is_allocated_bit_MASK 0x80000000
+#define DasPoolElmtId_counter_mask(index_bits) (~(((1 << index_bits) - 1) | DasPoolElmtId_is_allocated_bit_MASK))
+
+#define DasPoolElmtId_idx(Type, id) ((id).raw & ((1 << Type##_index_bits) - 1))
+#define DasPoolElmtId_counter(Type, id) (((id).raw & DasPoolElmtId_counter_mask(Type##_index_bits)) >> Type##_index_bits)
+
+//
+// use this to typedef a element identifier for your pool type.
+// there is an index bits variable and null identifier created by concatenating
+// type name. for typedef_DasPoolElmtId(TestId, 20)
+// TestId_index_bits and TestId_null will be defined.
+//
+// @param(Type): the name you wish to call the type
+//
+// @param(index_bits): the number of index bits you wish to use for the identifier.
+//     the number of counter bits is worked out from the rest. see DasPoolElmtId documentation.
+//
+#define typedef_DasPoolElmtId(Type, index_bits) \
+	static uint32_t Type##_index_bits = index_bits; \
+	typedef union Type Type; \
+	union Type { DasPoolElmtId Type##_raw; DasPoolElmtId raw; }; \
+	static Type Type##_null = { .raw = 0 }
+
+//
+// the internal record to link to the previous and next item.
+// can be in a free list or an allocated list.
+//
+typedef struct _DasPoolRecord _DasPoolRecord;
+struct _DasPoolRecord {
+	uint32_t prev_id;
+	// this next_id contains the counter and allocated bit for the element this record structure refers to.
+	DasPoolElmtId next_id;
+};
+
+//
+// the internal pool
+// WARNING: this must match the typedef'd pool below
+//
+typedef struct _DasPool _DasPool;
+struct _DasPool {
+	/*
+	// the data layout of the 'address_space' field
+
+	T elements[reserved_cap]
+	_DasPoolRecord records[reserved_cap]
+
+	// an _DasPoolRecord.next_id stores the is_allocated_bit, a counter and an index in the same integer.
+	// the index points to the next allocated index when it is allocated and
+	// will point to the the next free index when it is not allocated.
+	*/
+	void* address_space;
+	uint32_t count;
+	uint32_t cap;
+	uint32_t commited_cap;
+	uint32_t commit_grow_count;
+	uint32_t reserved_cap;
+	uint32_t page_size;
+	uint32_t free_list_head_id;
+	uint32_t alloced_list_head_id;
+	uint32_t alloced_list_tail_id: 31;
+	uint32_t order_free_list_on_dealloc: 1;
+};
+
+//
+// macro to use the typedef'd pool
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(T): the type you wish to use in the element pool
+//
+#define DasPool(IdType, T) DasPool_##IdType##_##T
+
+//
+// use this to typedef pool for a identifier and element type.
+// refer to the type using the DasPool macro.
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(T): the type you wish to use in the element pool
+//
+#define typedef_DasPool(IdType, T) \
+typedef struct { \
+	T* IdType##_address_space; \
+	uint32_t count; \
+	uint32_t cap; \
+	uint32_t commited_cap; \
+	uint32_t commit_grow_count; \
+	uint32_t reserved_cap; \
+	uint32_t page_size; \
+	uint32_t free_list_head_id; \
+	uint32_t alloced_list_head_id; \
+	uint32_t alloced_list_tail_id: 31; \
+	uint32_t order_free_list_on_dealloc: 1; \
+} DasPool_##IdType##_##T
+
+//
+// initializes the pool and reserves the address space needed to store @param(reserved_cap) number of elements.
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @param(reserved_cap): the suggested maximum number of elements the pool can expand to in bytes.
+//     this will be round up so that the virtual address space is reserved with a size aligned to reserve align.
+//     you can get the round up value in DasPool.reserved_cap
+//
+// @param(commit_grow_count): the suggested amount of elements to grow the commited memory of the pool when it needs to grow.
+//     this will be round up so that the commit grow size is aligned to the page size.
+//     you can get the round up value in DasPool.commit_grow_count.
+//     this new number will not be the exact grow count if the element size is not directly divisble by page size.
+//     this is due to the remainder not being stored in the integer.
+//
+// @return: 0 on success, otherwise a error code to indicate the error.
+//
+#define DasPool_init(IdType, pool, reserved_cap, commit_grow_count) \
+	_DasPool_init((_DasPool*)pool, reserved_cap, commit_grow_count, sizeof(*(pool)->IdType##_address_space))
+DasError _DasPool_init(_DasPool* pool, uint32_t reserved_cap, uint32_t commit_grow_count, uintptr_t elmt_size);
+
+//
+// deinitializes the pool by releasing the address space back to the OS and zeroing the pool structure
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @return: 0 on success, otherwise a error code to indicate the error.
+//
+#define DasPool_deinit(IdType, pool) \
+	_DasPool_deinit((_DasPool*)pool, sizeof(*(pool)->IdType##_address_space))
+DasError _DasPool_deinit(_DasPool* pool, uintptr_t elmt_size);
+
+//
+// reset the pool as if it has just been initialized. all commited memory is decommited
+// but the address_space is still reserved.
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @return: 0 on success, otherwise a error code to indicate the error.
+//
+#define DasPool_reset(IdType, pool) \
+	_DasPool_reset((_DasPool*)pool, sizeof(*(pool)->IdType##_address_space))
+DasError _DasPool_reset(_DasPool* pool, uintptr_t elmt_size);
+
+//
+// does a DasPool_reset and then initializes the pool with an array of elements.
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @param(elmts): a pointer to the array of elements
+//
+// @param(count): the number of elements in the array
+//
+// @return: 0 on success, otherwise a error code to indicate the error.
+//
+#define DasPool_reset_and_populate(IdType, pool, elmts, count) \
+	_DasPool_reset_and_populate((_DasPool*)pool, elmts, count, sizeof(*(pool)->IdType##_address_space))
+DasError _DasPool_reset_and_populate(_DasPool* pool, void* elmts, uint32_t count, uintptr_t elmt_size);
+
+//
+// allocates a zeroed element from the pool. the new element will be pushed on to
+// the tail of the allocated linked list.
+// the pool will try to allocate by using the head of the free list,
+// otherwise it will extend the capacity.
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @param(id_out): a pointer that is set apon success to the identifer of this allocation
+//
+// @return: a pointer to the new zeroed element but a value of NULL if allocation failed.
+//
+#define DasPool_alloc(IdType, pool, id_out) \
+	_DasPool_alloc((_DasPool*)pool, &(id_out)->IdType##_raw, sizeof(*(pool)->IdType##_address_space), IdType##_index_bits)
+void* _DasPool_alloc(_DasPool* pool, DasPoolElmtId* id_out, uintptr_t elmt_size, uint32_t index_bits);
+
+//
+// deallocates an element from the pool. the element will be removed from the allocated linked list
+// and will be pushed on to the head of the free list.
+// internally the element's counter will be incremented so the next allocation that
+// uses the same memory location will have a different counter.
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @param(elmt_id): the element identifier you wish to deallocate
+//
+#define DasPool_dealloc(IdType, pool, elmt_id) \
+	_DasPool_dealloc((_DasPool*)pool, elmt_id.IdType##_raw, sizeof(*(pool)->IdType##_address_space), IdType##_index_bits)
+void _DasPool_dealloc(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits);
+
+//
+// gets the pointer for the element with the provided element identifier.
+// aborts if the identifier is invalid (already freed or out of bounds).
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @param(elmt_id): the element identifier you wish to get a pointer to
+//
+// @return: a pointer to the element
+//
+#define DasPool_id_to_ptr(IdType, pool, elmt_id) \
+	((typeof((pool)->IdType##_address_space))_DasPool_id_to_ptr((_DasPool*)pool, elmt_id.IdType##_raw, sizeof(*(pool)->IdType##_address_space), IdType##_index_bits))
+void* _DasPool_id_to_ptr(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits);
+
+//
+// gets the index for the element with the provided element identifier.
+// aborts if the identifier is invalid (already freed or out of bounds).
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @param(elmt_id): the element identifier you wish to get a pointer to
+//
+// @return: the index of the element
+//
+#define DasPool_id_to_idx(IdType, pool, elmt_id) \
+	_DasPool_id_to_idx((_DasPool*)pool, elmt_id.IdType##_raw, sizeof(*(pool)->IdType##_address_space), IdType##_index_bits)
+uint32_t _DasPool_id_to_idx(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits);
+
+//
+// gets the identifier for the element with the provided element pointer.
+// aborts if the pointer is out of bounds or the element at the pointer is not allocated.
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @param(ptr): the pointer to the element you wish to get an identifier for
+//
+// @return: the identifier to the element
+//
+#define DasPool_ptr_to_id(IdType, pool, ptr) \
+	((IdType) { .IdType##_raw = _DasPool_ptr_to_id((_DasPool*)pool, ptr, sizeof(*(pool)->IdType##_address_space), IdType##_index_bits) })
+DasPoolElmtId _DasPool_ptr_to_id(_DasPool* pool, void* ptr, uintptr_t elmt_size, uint32_t index_bits);
+
+//
+// gets the index for the element with the provided element pointer.
+// aborts if the pointer is out of bounds or the element at the pointer is not allocated.
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @param(ptr): the pointer to the element you wish to get an index for
+//
+// @return: the index of the element
+//
+#define DasPool_ptr_to_idx(IdType, pool, ptr) \
+	_DasPool_ptr_to_idx((_DasPool*)pool, ptr, sizeof(*(pool)->IdType##_address_space), IdType##_index_bits)
+uint32_t _DasPool_ptr_to_idx(_DasPool* pool, void* ptr, uintptr_t elmt_size, uint32_t index_bits);
+
+//
+// gets the pointer for the element with the provided element index.
+// aborts if the index is out of bounds or the element at the index is not allocated.
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @param(idx): the index of the element you wish to get a pointer to
+//
+// @return: a pointer to the element
+//
+#define DasPool_idx_to_ptr(IdType, pool, idx) \
+	((typeof((pool)->IdType##_address_space))_DasPool_idx_to_ptr((_DasPool*)pool, idx, sizeof(*(pool)->IdType##_address_space)))
+void* _DasPool_idx_to_ptr(_DasPool* pool, uint32_t idx, uintptr_t elmt_size);
+
+//
+// gets the identifier for the element with the provided element index.
+// aborts if the index is out of bounds or the element at the index is not allocated.
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @param(idx): the index of the element you wish to get a identifier for
+//
+// @return: the identifier of the element
+//
+#define DasPool_idx_to_id(IdType, pool, idx) \
+	((IdType) { .IdType##_raw = _DasPool_idx_to_id((_DasPool*)pool, idx, sizeof(*(pool)->IdType##_address_space), IdType##_index_bits) })
+DasPoolElmtId _DasPool_idx_to_id(_DasPool* pool, uint32_t idx, uintptr_t elmt_size, uint32_t index_bits);
+
+//
+// goes to the next allocated element in the linked list from the provided element identifier.
+// if @param(elmt_id) is the null identifier then the start of the allocated linked list is returned.
+// see typedef_DasPoolElmtId for how to get the null identifier.
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @param(elmt_id): the element identifier to move from
+//
+// @return: the identifier of the next element, the null identifier will be returned if the element
+// at the end of the allocated linked list was the @param(elmt_id)
+//
+#define DasPool_iter_next(IdType, pool, elmt_id) \
+	((IdType) { .IdType##_raw = _DasPool_iter_next((_DasPool*)pool, elmt_id.IdType##_raw, sizeof(*(pool)->IdType##_address_space), IdType##_index_bits) })
+DasPoolElmtId _DasPool_iter_next(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits);
+
+//
+// goes to the previous allocated element in the linked list from the provided element identifier.
+// if @param(elmt_id) is the null identifier then the end of the allocated linked list is returned.
+// see typedef_DasPoolElmtId for how to get the null identifier.
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @param(elmt_id): the element identifier to move from
+//
+// @return: the identifier of the previous element, the null identifier will be returned if the element
+// at the start of the allocated linked list was the @param(elmt_id)
+//
+#define DasPool_iter_prev(IdType, pool, elmt_id) \
+	((IdType) { .IdType##_raw = _DasPool_iter_prev((_DasPool*)pool, elmt_id.IdType##_raw, sizeof(*(pool)->IdType##_address_space), IdType##_index_bits) })
+DasPoolElmtId _DasPool_iter_prev(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits);
+
+//
+// decrements the internal counter of the element by 1. this will invalidate
+// the current identifier and restore the previous identifier at the same index
+// as this one.
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @param(elmt_id): the element identifier you wish to decrement
+//
+// @return: the new identifier as a result of decrementing the counter
+//
+#define DasPool_decrement_record_counter(IdType, pool, elmt_id) \
+	((IdType) { .IdType##_raw = _DasPool_decrement_record_counter((_DasPool*)pool, elmt_id.IdType##_raw, sizeof(*(pool)->IdType##_address_space), IdType##_index_bits) })
+DasPoolElmtId _DasPool_decrement_record_counter(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits);
+
+//
+// see if an element at the provided index is allocated or not.
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @param(idx): the index of the element you wish to check
+//
+// @return: das_true if the element is allocated, otherwise das_false is returned
+//
+#define DasPool_is_idx_allocated(IdType, pool, idx) \
+	_DasPool_is_idx_allocated((_DasPool*)pool, idx, sizeof(*(pool)->IdType##_address_space))
+DasBool _DasPool_is_idx_allocated(_DasPool* pool, uint32_t idx, uintptr_t elmt_size);
 
 #endif
 
