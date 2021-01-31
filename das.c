@@ -148,6 +148,7 @@ void* das_system_alloc_fn(void* alloc_data, void* ptr, uintptr_t old_size, uintp
 // ======================================================================
 
 DasBool _DasStk_init_with_alctor(_DasStkHeader** header_out, uintptr_t header_size, uintptr_t init_cap, DasAlctor alctor, uintptr_t elmt_size) {
+	init_cap = das_max_u(DasStk_min_cap, init_cap);
 	uintptr_t new_size = header_size + init_cap * elmt_size;
 	_DasStkHeader* new_header = das_alloc(alctor, new_size, alignof(das_max_align_t));
 	if (!new_header) return das_false;
@@ -162,15 +163,16 @@ DasBool _DasStk_init_with_alctor(_DasStkHeader** header_out, uintptr_t header_si
 }
 
 DasBool _DasStk_init_clone_with_alctor(_DasStkHeader** dst_header_in_out, uintptr_t header_size, _DasStkHeader* src_header, DasAlctor alctor, uintptr_t elmt_size) {
-	if (!_DasStk_init_with_alctor(dst_header_in_out, header_size, src_header->count, alctor, elmt_size))
+	uintptr_t src_count = DasStk_count(&src_header);
+	if (!_DasStk_init_with_alctor(dst_header_in_out, header_size, src_count, alctor, elmt_size))
 		return das_false;
 
 	_DasStkHeader* dst_header = *dst_header_in_out;
 
 	void* dst = das_ptr_add(dst_header, header_size);
 	void* src = das_ptr_add(src_header, header_size);
-	memcpy(dst, src, src_header->count * elmt_size);
-	dst_header->count = src_header->count;
+	memcpy(dst, src, src_count * elmt_size);
+	dst_header->count = src_count;
 	return das_true;
 }
 
@@ -190,8 +192,9 @@ DasBool _DasStk_resize(_DasStkHeader** header_in_out, uintptr_t header_size, uin
 	_DasStkHeader* header = *header_in_out;
 	//
 	// extend the capacity of the stack if the new count extends past the capacity.
-	if (header->cap < new_count) {
-		DasBool res = _DasStk_resize_cap(header_in_out, header_size, das_max_u(new_count, header->cap * 2), elmt_size);
+	uintptr_t old_cap = DasStk_cap(header_in_out);
+	if (old_cap < new_count) {
+		DasBool res = _DasStk_resize_cap(header_in_out, header_size, das_max_u(new_count, old_cap * 2), elmt_size);
 		if (!res) return das_false;
 		header = *header_in_out;
 	}
@@ -222,7 +225,7 @@ DasBool _DasStk_resize_cap(_DasStkHeader** header_in_out, uintptr_t header_size,
 	//
 	// reallocate the stack while taking into account of size of the header.
 	// the block of memory is aligned to alignof(das_max_align_t).
-	uintptr_t size = header_size + cap * elmt_size;
+	uintptr_t size = header ? header_size + cap * elmt_size : 0;
 	uintptr_t new_size = header_size + new_cap * elmt_size;
 	_DasStkHeader* new_header = das_realloc(alctor, header, size, new_size, alignof(das_max_align_t));
 	if (!new_header) return das_false;
@@ -445,7 +448,7 @@ DasBool _DasDeque_resize_cap(_DasDequeHeader** header_in_out, uintptr_t header_s
 
 	DasAlctor alctor = header && header->alctor.fn != NULL ? header->alctor : DasAlctor_default;
 
-	uintptr_t size = header_size + cap * elmt_size;
+	uintptr_t size = header ? header_size + cap * elmt_size : 0;
 	uintptr_t new_size = header_size + new_cap * elmt_size;
 	_DasDequeHeader* new_header = das_realloc(alctor, header, size, new_size, alignof(das_max_align_t));
 	if (!new_header) return das_false;
@@ -453,9 +456,9 @@ DasBool _DasDeque_resize_cap(_DasDequeHeader** header_in_out, uintptr_t header_s
 		new_header->alctor = alctor;
 		new_header->front_idx = 0;
 		new_header->back_idx = 0;
+		new_header->cap = 0;
 	}
 
-	new_header->alctor = alctor;
 	uintptr_t old_cap = new_header->cap;
 	new_header->cap = new_cap;
 	*header_in_out = new_header;
@@ -1328,7 +1331,7 @@ DasError _DasPool_init(_DasPool* pool, uint32_t reserved_cap, uint32_t commit_gr
 
 	//
 	// see how many elements we can actually grow by rounding up grow size to the page size.
-	uintptr_t commit_grow_size = das_round_down_nearest_multiple_u((uintptr_t)commit_grow_count * elmt_size, page_size);
+	uintptr_t commit_grow_size = das_round_up_nearest_multiple_u((uintptr_t)commit_grow_count * elmt_size, page_size);
 	commit_grow_count = commit_grow_size / elmt_size;
 
 	pool->page_size = page_size;
@@ -1385,6 +1388,7 @@ DasError _DasPool_reset(_DasPool* pool, uintptr_t elmt_size) {
 }
 
 DasBool _DasPool_commit_next_chunk(_DasPool* pool, uintptr_t elmt_size) {
+	das_assert(pool->address_space, "pool has not been initialized. use DasPool_init before allocating");
 	if (pool->commited_cap == pool->reserved_cap)
 		return das_false;
 
