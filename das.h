@@ -179,8 +179,8 @@ extern void* das_ptr_round_down_align(void* ptr, uintptr_t align);
 #define das_copy_array(dst, src) memcpy(dst, src, sizeof(dst))
 #define das_copy_elmts(dst, src, elmts_count) memcpy(dst, src, elmts_count * sizeof(*(dst)))
 #define das_copy_overlap_elmts(dst, src, elmts_count) memmove(dst, src, elmts_count * sizeof(*(dst)))
-#define das_cmp_array(a, b) (memcmp(a, b, sizeof(a)) == 0);
-#define das_cmp_elmt(a, b) (memcmp(a, b, sizeof(*(a))) == 0);
+#define das_cmp_array(a, b) (memcmp(a, b, sizeof(a)) == 0)
+#define das_cmp_elmt(a, b) (memcmp(a, b, sizeof(*(a))) == 0)
 #define das_cmp_elmts(a, b, elmts_count) (memcmp(a, b, elmts_count * sizeof(*(a))) == 0)
 
 // for X86/64 and ARM. maybe be different for other architectures.
@@ -398,7 +398,7 @@ extern void _DasStk_deinit(_DasStkHeader** header_in_out, uintptr_t header_size,
 
 // returns a pointer to the element at idx.
 // this function will abort if idx is out of bounds
-#define DasStk_get(stk_ptr, idx) &(DasStk_data(stk_ptr)[_DasStk_assert_idx((_DasStkHeader*)*(stk_ptr), idx, DasStk_elmt_size(stk_ptr))])
+#define DasStk_get(stk_ptr, idx) (&DasStk_data(stk_ptr)[_DasStk_assert_idx((_DasStkHeader*)*(stk_ptr), idx, DasStk_elmt_size(stk_ptr))])
 extern uintptr_t _DasStk_assert_idx(_DasStkHeader* header, uintptr_t idx, uintptr_t elmt_size);
 
 // returns a pointer to the element at idx starting from the back of the stack.
