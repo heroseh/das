@@ -159,6 +159,40 @@ static inline double das_round_down_nearest_multiple_f(double v, double multiple
 	}
 }
 
+#define das_most_set_bit_idx(v) _das_most_set_bit_idx(v, sizeof(v))
+static inline uintmax_t _das_most_set_bit_idx(uintmax_t v, uint32_t sizeof_type) {
+#ifdef __GNUC__
+	uint32_t idx = sizeof(v) * 8;
+	uint32_t type_diff = (sizeof(uintmax_t) - sizeof_type) * 8;
+	idx -= type_diff;
+	if (sizeof(v) == sizeof(long long)) {
+		idx -= __builtin_clzll(v);
+	} else if (sizeof(v) == sizeof(long)) {
+		idx -= __builtin_clzl(v);
+	} else {
+		idx -= __builtin_clz(v);
+	}
+	idx -= 1;
+	return idx;
+#else
+#error "unhandle least set bit for this platform"
+#endif
+}
+
+static inline uintmax_t das_least_set_bit_idx(uintmax_t v) {
+#ifdef __GNUC__
+	if (sizeof(v) == sizeof(long long)) {
+		return __builtin_ctzll(v);
+	} else if (sizeof(v) == sizeof(long)) {
+		return __builtin_ctzl(v);
+	} else {
+		return __builtin_ctz(v);
+	}
+#else
+#error "unhandle least set bit for this platform"
+#endif
+}
+
 // ======================================================================
 //
 //
@@ -1313,7 +1347,7 @@ DasError _DasPool_reset_and_populate(_DasPool* pool, void* elmts, uint32_t count
 //
 // @param(pool): a pointer to the pool structure
 //
-// @param(id_out): a pointer that is set apon success to the identifer of this allocation
+// @param(id_out): a pointer that is set apon success to the identifier of this allocation
 //
 // @return: a pointer to the new zeroed element but a value of NULL if allocation failed.
 //
@@ -1500,6 +1534,21 @@ DasPoolElmtId _DasPool_decrement_record_counter(_DasPool* pool, DasPoolElmtId el
 #define DasPool_is_idx_allocated(IdType, pool, idx) \
 	_DasPool_is_idx_allocated((_DasPool*)pool, idx, sizeof(*(pool)->IdType##_address_space))
 DasBool _DasPool_is_idx_allocated(_DasPool* pool, uint32_t idx, uintptr_t elmt_size);
+
+//
+// see if the supplied element identifier is valid and can be used to get an element.
+//
+// @param(IdType): the name of the element identifier made with typedef_DasPoolElmtId
+//
+// @param(pool): a pointer to the pool structure
+//
+// @param(elmt_id): the element identifier you wish to check
+//
+// @return: das_true if the element identifier is valid, otherwise das_false is returned
+//
+#define DasPool_is_id_valid(IdType, pool, elmt_id) \
+	_DasPool_is_id_valid((_DasPool*)pool, elmt_id.IdType##_raw, sizeof(*(pool)->IdType##_address_space), IdType##_index_bits)
+DasBool _DasPool_is_id_valid(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits);
 
 #endif
 

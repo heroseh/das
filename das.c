@@ -1302,6 +1302,7 @@ static void _DasPool_assert_id(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t 
 	uint32_t idx_id = elmt_id & index_mask;
 	das_assert(idx_id, "the index identifier cannot be null");
 	_DasPoolRecord* record = &_DasPool_records(pool, elmt_size)[idx_id - 1];
+	das_assert(record->next_id & DasPoolElmtId_is_allocated_bit_MASK, "the record is not allocated");
 
 	DasPoolElmtId counter_mask = DasPoolElmtId_counter_mask(index_bits);
 	uint32_t counter = (elmt_id & counter_mask) >> index_bits;
@@ -1784,5 +1785,22 @@ DasBool _DasPool_is_idx_allocated(_DasPool* pool, uint32_t idx, uintptr_t elmt_s
 	das_assert(idx < pool->cap, "index of '%u' is out of the pool boundary of '%u' elements", idx, pool->cap);
 	_DasPoolRecord* record = &_DasPool_records(pool, elmt_size)[idx];
 	return (record->next_id & DasPoolElmtId_is_allocated_bit_MASK) == DasPoolElmtId_is_allocated_bit_MASK;
+}
+
+DasBool _DasPool_is_id_valid(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits) {
+	if (elmt_id == 0) return das_false;
+	if ((elmt_id & DasPoolElmtId_is_allocated_bit_MASK) != 0) return das_false;
+	DasPoolElmtId index_mask = (1 << index_bits) - 1;
+	uint32_t idx_id = elmt_id & index_mask;
+	if (idx_id == 0) return das_false;
+	_DasPoolRecord* record = &_DasPool_records(pool, elmt_size)[idx_id - 1];
+	if ((record->next_id & DasPoolElmtId_is_allocated_bit_MASK) != 0) return das_false;
+
+	DasPoolElmtId counter_mask = DasPoolElmtId_counter_mask(index_bits);
+	uint32_t counter = (elmt_id & counter_mask) >> index_bits;
+	uint32_t record_counter = (record->next_id & counter_mask) >> index_bits;
+	if (counter != record_counter) return das_false;
+
+	return das_true;
 }
 
