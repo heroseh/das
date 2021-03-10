@@ -1,6 +1,15 @@
 #ifndef DAS_H
 #define DAS_H
 
+#if _WIN32
+// TODO: i have read that the windows headers can really slow down compile times.
+// since the win32 api is stable maybe we should forward declare the functions and constants manually ourselves.
+// maybe we can generate this using the new win32metadata thing if we can figure that out.
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 // ======================================================================
 //
 //
@@ -53,6 +62,8 @@ typedef void* HANDLE;
 typedef uint8_t DasBool;
 #define das_false 0
 #define das_true 1
+
+#define das_static_assert(x, msg) int das_static_assert(int dummy[(x)?1:-1])
 
 #ifndef das_noreturn
 
@@ -161,33 +172,49 @@ static inline double das_round_down_nearest_multiple_f(double v, double multiple
 
 #define das_most_set_bit_idx(v) _das_most_set_bit_idx(v, sizeof(v))
 static inline uintmax_t _das_most_set_bit_idx(uintmax_t v, uint32_t sizeof_type) {
-#ifdef __GNUC__
+#if defined(__GNUC__) || defined(__TINYC__)
 	uint32_t idx = sizeof(v) * 8;
 	uint32_t type_diff = (sizeof(uintmax_t) - sizeof_type) * 8;
 	idx -= type_diff;
-	if (sizeof(v) == sizeof(long long)) {
-		idx -= __builtin_clzll(v);
-	} else if (sizeof(v) == sizeof(long)) {
+	if (sizeof_type == sizeof(long)) {
 		idx -= __builtin_clzl(v);
-	} else {
+	} else if (sizeof_type == sizeof(int)) {
 		idx -= __builtin_clz(v);
+	} else {
+		idx -= __builtin_clzll(v);
 	}
 	idx -= 1;
 	return idx;
+#elif defined(_WIN32)
+	DWORD leading_zero = 0;
+	if (sizeof_type == sizeof(int)) {
+		_BitScanReverse(&leading_zero, v);
+	} else {
+		_BitScanReverse64(&leading_zero, v);
+	}
+	return leading_zero;
 #else
 #error "unhandle least set bit for this platform"
 #endif
 }
 
 static inline uintmax_t das_least_set_bit_idx(uintmax_t v) {
-#ifdef __GNUC__
-	if (sizeof(v) == sizeof(long long)) {
-		return __builtin_ctzll(v);
-	} else if (sizeof(v) == sizeof(long)) {
+#if defined(__GNUC__) || defined(__TINYC__)
+	if (sizeof(v) == sizeof(long)) {
 		return __builtin_ctzl(v);
-	} else {
+	} else if (sizeof(v) == sizeof(int)) {
 		return __builtin_ctz(v);
+	} else {
+		return __builtin_ctzll(v);
 	}
+#elif defined(_WIN32)
+	DWORD trailing_zero = 0;
+	if (sizeof(v) == sizeof(int)) {
+		_BitScanForward(&trailing_zero, v);
+	} else {
+		_BitScanForward64(&trailing_zero, v);
+	}
+	return trailing_zero;
 #else
 #error "unhandle least set bit for this platform"
 #endif
@@ -400,7 +427,7 @@ typedef_DasStk(int64_t);
 #define DasStk_elmt_size(stk_ptr) (sizeof(*(*(stk_ptr))->DasStk_data))
 #define DasStk_alctor(stk_ptr) ((*stk_ptr) ? (*(stk_ptr))->alctor : DasAlctor_default)
 
-#define DasStk_for_each(stk_ptr, INDEX_NAME) \
+#define DasStk_foreach(stk_ptr, INDEX_NAME) \
 	for (uintptr_t INDEX_NAME = 0, _end_ = DasStk_count(stk_ptr); INDEX_NAME < _end_; INDEX_NAME += 1)
 
 //

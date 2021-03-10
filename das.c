@@ -1,5 +1,5 @@
 #ifndef DAS_H
-#error "expected das.h to be included before das.c"
+#include "das.h"
 #endif
 
 #ifdef __linux__
@@ -10,13 +10,6 @@
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
-#elif _WIN32
-// TODO: i have read that the windows headers can really slow down compile times.
-// since the win32 api is stable maybe we should forward declare the functions and constants manually ourselves.
-// maybe we can generate this using the new win32metadata thing if we can figure that out.
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 #endif
 
 // ======================================================================
@@ -1376,7 +1369,7 @@ DasError _DasPool_reset(_DasPool* pool, uintptr_t elmt_size) {
 
 	//
 	// decommit all of the commited pages of memory for the records
-	error = das_virt_mem_decommit(records, elmts_size);
+	error = das_virt_mem_decommit(records, records_size);
 	if (error) return error;
 
 	pool->count = 0;
@@ -1789,12 +1782,12 @@ DasBool _DasPool_is_idx_allocated(_DasPool* pool, uint32_t idx, uintptr_t elmt_s
 
 DasBool _DasPool_is_id_valid(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits) {
 	if (elmt_id == 0) return das_false;
-	if ((elmt_id & DasPoolElmtId_is_allocated_bit_MASK) != 0) return das_false;
+	if ((elmt_id & DasPoolElmtId_is_allocated_bit_MASK) == 0) return das_false;
 	DasPoolElmtId index_mask = (1 << index_bits) - 1;
 	uint32_t idx_id = elmt_id & index_mask;
 	if (idx_id == 0) return das_false;
 	_DasPoolRecord* record = &_DasPool_records(pool, elmt_size)[idx_id - 1];
-	if ((record->next_id & DasPoolElmtId_is_allocated_bit_MASK) != 0) return das_false;
+	if ((record->next_id & DasPoolElmtId_is_allocated_bit_MASK) == 0) return das_false;
 
 	DasPoolElmtId counter_mask = DasPoolElmtId_counter_mask(index_bits);
 	uint32_t counter = (elmt_id & counter_mask) >> index_bits;
