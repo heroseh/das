@@ -183,6 +183,13 @@ uintptr_t _DasStk_assert_idx(_DasStkHeader* header, uintptr_t idx, uintptr_t elm
 
 DasBool _DasStk_resize(_DasStkHeader** header_in_out, uintptr_t header_size, uintptr_t new_count, DasBool zero, uintptr_t elmt_size) {
 	_DasStkHeader* header = *header_in_out;
+	if (new_count == 0) {
+		if (header) {
+			_DasStk_deinit(header_in_out, header_size, elmt_size);
+		}
+		return das_true;
+	}
+
 	//
 	// extend the capacity of the stack if the new count extends past the capacity.
 	uintptr_t old_cap = DasStk_cap(header_in_out);
@@ -266,6 +273,7 @@ void* _DasStk_insert_many(_DasStkHeader** header_in_out, uintptr_t header_size, 
 }
 
 void* _DasStk_push_many(_DasStkHeader** header_in_out, uintptr_t header_size, void* elmts, uintptr_t elmts_count, uintptr_t elmt_size) {
+	das_debug_assert(elmts_count != 0, "cannot push zero elements on a stack");
 	_DasStkHeader* header = *header_in_out;
 	uintptr_t count = header ? header->count : 0;
 	uintptr_t cap = header ? header->cap : 0;
