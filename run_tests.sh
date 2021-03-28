@@ -21,13 +21,3 @@ if test -f "das_test"; then
 	./das_test
 fi
 
-if test -f "das_test"; then
-	rm das_test
-	echo "running das_test on tcc..."
-	tcc -Wpedantic -Werror -g -o das_test das_test.c
-fi
-
-if test -f "das_test"; then
-	./das_test
-fi
-

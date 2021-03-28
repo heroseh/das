@@ -26,7 +26,7 @@ Patches are welcome to improve support for other compilers and language targets 
 
 Tested Platforms:
 - Windows (visual studio (cl), clang)
-- Linux (clang & gcc & tcc)
+- Linux (clang & gcc)
 - MacOS (clang) - untested but should work since it's clang. let me know if you can test it!
 - IOS (clang) - untested but should work since it's clang. let me know if you can test it!
 - Android (gcc) - untested but should work since it's gcc. let me know if you can test it!

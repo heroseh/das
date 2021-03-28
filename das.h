@@ -104,11 +104,7 @@ das_noreturn void _das_abort(const char* file, int line, const char* func, char*
 #endif
 
 #ifndef alignof
-#ifdef __TINYC__
-#define alignof __alignof__
-#else
 #define alignof _Alignof
-#endif
 #endif
 
 static inline uintptr_t das_min_u(uintptr_t a, uintptr_t b) { return a < b ? a : b; }
@@ -172,7 +168,7 @@ static inline double das_round_down_nearest_multiple_f(double v, double multiple
 
 #define das_most_set_bit_idx(v) _das_most_set_bit_idx(v, sizeof(v))
 static inline uintmax_t _das_most_set_bit_idx(uintmax_t v, uint32_t sizeof_type) {
-#if defined(__GNUC__) || defined(__TINYC__)
+#if defined(__GNUC__)
 	uint32_t idx = sizeof(v) * 8;
 	uint32_t type_diff = (sizeof(uintmax_t) - sizeof_type) * 8;
 	idx -= type_diff;
@@ -199,7 +195,7 @@ static inline uintmax_t _das_most_set_bit_idx(uintmax_t v, uint32_t sizeof_type)
 }
 
 static inline uintmax_t das_least_set_bit_idx(uintmax_t v) {
-#if defined(__GNUC__) || defined(__TINYC__)
+#if defined(__GNUC__)
 	if (sizeof(v) == sizeof(long)) {
 		return __builtin_ctzl(v);
 	} else if (sizeof(v) == sizeof(int)) {
@@ -637,6 +633,9 @@ typedef_DasDeque(int64_t);
 #define DasDeque_elmt_size(deque_ptr) (sizeof(*(*(deque_ptr))->DasDeque_data))
 #define DasDeque_alctor(deque_ptr) ((*deque_ptr) ? (*(deque_ptr))->alctor : DasAlctor_default)
 
+#define DasDeque_foreach(stk_ptr, INDEX_NAME) \
+	for (uintptr_t INDEX_NAME = 0, _end_ = DasDeque_count(stk_ptr); INDEX_NAME < _end_; INDEX_NAME += 1)
+
 //
 // there is no DasDeque_init, zeroed data is initialization.
 //
@@ -715,6 +714,16 @@ uintptr_t _DasDeque_pop_front_many(_DasDequeHeader* header, uintptr_t elmts_coun
 #define DasDeque_pop_back(deque_ptr) DasDeque_pop_back_many(deque_ptr, 1)
 #define DasDeque_pop_back_many(deque_ptr, elmts_count) _DasDeque_pop_back_many((_DasDequeHeader*)*(deque_ptr), elmts_count, DasDeque_elmt_size(deque_ptr))
 uintptr_t _DasDeque_pop_back_many(_DasDequeHeader* header, uintptr_t elmts_count, uintptr_t elmt_size);
+
+// ===========================================================================
+//
+//
+// Stacktrace
+//
+//
+// ===========================================================================
+
+DasBool das_stacktrace(uint32_t ignore_levels_count, DasStk(char)* string_out);
 
 // ===========================================================================
 //
@@ -1205,7 +1214,7 @@ typedef uint32_t DasPoolElmtId;
 #define DasPoolElmtId_is_allocated_bit_MASK 0x80000000
 #define DasPoolElmtId_counter_mask(index_bits) (~(((1 << index_bits) - 1) | DasPoolElmtId_is_allocated_bit_MASK))
 
-#define DasPoolElmtId_idx(Type, id) ((id).raw & ((1 << Type##_index_bits) - 1))
+#define DasPoolElmtId_idx(Type, id) (((id).raw & ((1 << Type##_index_bits) - 1)) - 1)
 #define DasPoolElmtId_counter(Type, id) (((id).raw & DasPoolElmtId_counter_mask(Type##_index_bits)) >> Type##_index_bits)
 
 //
@@ -1411,7 +1420,7 @@ void _DasPool_dealloc(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size
 // @return: a pointer to the element
 //
 #define DasPool_id_to_ptr(IdType, pool, elmt_id) \
-	((typeof((pool)->IdType##_address_space))_DasPool_id_to_ptr((_DasPool*)pool, elmt_id.IdType##_raw, sizeof(*(pool)->IdType##_address_space), IdType##_index_bits))
+	(_DasPool_id_to_ptr((_DasPool*)pool, elmt_id.IdType##_raw, sizeof(*(pool)->IdType##_address_space), IdType##_index_bits))
 void* _DasPool_id_to_ptr(_DasPool* pool, DasPoolElmtId elmt_id, uintptr_t elmt_size, uint32_t index_bits);
 
 //
@@ -1475,7 +1484,7 @@ uint32_t _DasPool_ptr_to_idx(_DasPool* pool, void* ptr, uintptr_t elmt_size, uin
 // @return: a pointer to the element
 //
 #define DasPool_idx_to_ptr(IdType, pool, idx) \
-	((typeof((pool)->IdType##_address_space))_DasPool_idx_to_ptr((_DasPool*)pool, idx, sizeof(*(pool)->IdType##_address_space)))
+	(_DasPool_idx_to_ptr((_DasPool*)pool, idx, sizeof(*(pool)->IdType##_address_space)))
 void* _DasPool_idx_to_ptr(_DasPool* pool, uint32_t idx, uintptr_t elmt_size);
 
 //

@@ -22,8 +22,8 @@ int main(int argc, char** argv) {
 		v_##type.b = i; \
 		v_##type.c = i; \
 		v_##type.d = i; \
-		uintptr_t idx = DasStk_push(&s_##type); \
-		*DasStk_get(&s_##type, idx) = v_##type; \
+		type* dst = DasStk_push(&s_##type, NULL); \
+		*dst = v_##type; \
 	} \
 	/* end */
 

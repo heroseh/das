@@ -10,6 +10,8 @@
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
+#elif _WIN32
+#include <Dbghelp.h>
 #endif
 
 // ======================================================================
@@ -373,6 +375,7 @@ void* DasStk_push_str_fmtv(DasStk(char)* stk, char* fmt, va_list args) {
 	// to actually copy the formatted string.
 	char* ptr = das_ptr_add(DasStk_data(stk), insert_idx);
 	count = vsnprintf(ptr, count, fmt, args);
+	DasStk_set_count(stk, new_count - 1); // now set the new count minus the null terminator
 	return ptr;
 }
 
@@ -600,6 +603,60 @@ uintptr_t _DasDeque_pop_back_many(_DasDequeHeader* header, uintptr_t elmts_count
 
 	header->back_idx = _DasDeque_wrapping_sub(header->cap, header->back_idx, elmts_count);
 	return elmts_count;
+}
+
+// ===========================================================================
+//
+//
+// Stacktrace
+//
+//
+// ===========================================================================
+
+#ifdef __GNUC__
+#include <execinfo.h>
+#endif
+
+DasBool das_stacktrace(uint32_t ignore_levels_count, DasStk(char)* string_out) {
+#define STACKTRACE_LEVELS_MAX 128
+#if defined(__GNUC__)
+	void* stacktrace_levels[STACKTRACE_LEVELS_MAX];
+	int stacktrace_levels_count = backtrace(stacktrace_levels, STACKTRACE_LEVELS_MAX);
+
+	char** strings = backtrace_symbols(stacktrace_levels, stacktrace_levels_count);
+	if (strings == NULL) return das_false;
+
+	for (int i = ignore_levels_count; i < stacktrace_levels_count; i += 1) {
+		if (!DasStk_push_str_fmt(string_out, "%u: %s\n", stacktrace_levels_count - i - 1, strings[i])) {
+			return das_false;
+		}
+	}
+
+	free(strings);
+#elif defined(_WIN32)
+	void* stacktrace_levels[STACKTRACE_LEVELS_MAX];
+	HANDLE process = GetCurrentProcess();
+
+	SymInitialize(process, NULL, TRUE);
+
+	uint32_t stacktrace_levels_count = CaptureStackBackTrace(0, STACKTRACE_LEVELS_MAX, stacktrace_levels, NULL);
+	SYMBOL_INFO* symbol = (SYMBOL_INFO*)calloc(sizeof(SYMBOL_INFO) + 256 * sizeof(char), 1);
+	symbol->MaxNameLen   = 255;
+	symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+
+	for (uint32_t i = ignore_levels_count; i < stacktrace_levels_count; i += 1) {
+		SymFromAddr(process, (DWORD64)stacktrace_levels[i], 0, symbol);
+		if (!DasStk_push_str_fmt(string_out, "%u: %s - [0x%0X]\n", stacktrace_levels_count - i - 1, symbol->Name, symbol->Address)) {
+			return das_false;
+		}
+	}
+
+	free(symbol);
+#else
+#error "das_stacktrace has been unimplemented for this platform"
+#endif
+
+	return das_true;
 }
 
 // ===========================================================================
