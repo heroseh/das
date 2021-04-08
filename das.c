@@ -179,7 +179,7 @@ void _DasStk_deinit(_DasStkHeader** header_in_out, uintptr_t header_size, uintpt
 }
 
 uintptr_t _DasStk_assert_idx(_DasStkHeader* header, uintptr_t idx, uintptr_t elmt_size) {
-	das_assert(idx < header->count, "idx '%zu' is out of bounds for a stack of count '%zu'", idx, header->count);
+	das_assert(header != NULL && idx < header->count, "idx '%zu' is out of bounds for a stack of count '%zu'", idx, header ? header->count : 0);
 	return idx;
 }
 
